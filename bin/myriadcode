@@ -93,10 +93,38 @@ TimeoutStopSec=20
 WantedBy=default.target
 EOF
   systemctl --user daemon-reload
-  systemctl --user enable --now "$UNIT"
+  # Started, not enabled. The unit is here so the server outlives the terminal
+  # it was launched from and comes back if it crashes -- not so that it is
+  # already running before anyone has asked for it. A machine that boots
+  # straight into a loaded whisper model, an open database and a server holding
+  # the port is one where `myriadcode` answers "already running" to somebody who
+  # has only just sat down, which reads as the app having done something behind
+  # their back. Opt into login start with `myriadcode service autostart on`.
+  systemctl --user start "$UNIT"
   echo "myriadcode: installed $UNIT_PATH"
-  echo "           starts at login and restarts on failure; $URL"
+  echo "           running now and restarts on failure; $URL"
+  echo "           it does NOT start at login -- 'myriadcode service autostart on' if you want that"
   echo "           logs: journalctl --user -u $UNIT -f"
+}
+
+set_autostart() {
+  command -v systemctl >/dev/null 2>&1 || {
+    echo "myriadcode: no systemctl on this machine" >&2; return 1; }
+  service_installed || {
+    echo "myriadcode: no service installed. Run: myriadcode service install" >&2; return 1; }
+  case "$1" in
+    on)
+      systemctl --user enable "$UNIT"
+      echo "myriadcode: will start at login"
+      ;;
+    off)
+      # disable, not `disable --now`: turning off the login start is not a
+      # request to take down the server you are presently using.
+      systemctl --user disable "$UNIT"
+      echo "myriadcode: will not start at login (still running now, if it was)"
+      ;;
+    *) echo "usage: myriadcode service autostart on|off" >&2; return 2 ;;
+  esac
 }
 
 uninstall_service() {
@@ -145,7 +173,8 @@ case "${1:-}" in
     case "${2:-}" in
       install)   install_service; exit $? ;;
       uninstall) uninstall_service; exit 0 ;;
-      *) echo "usage: myriadcode service install|uninstall" >&2; exit 2 ;;
+      autostart) set_autostart "${3:-}"; exit $? ;;
+      *) echo "usage: myriadcode service install|uninstall|autostart on|off" >&2; exit 2 ;;
     esac
     ;;
   status)
@@ -172,10 +201,13 @@ myriadcode status     is it running, and on what pid
 myriadcode open       just open the browser at a server already running
 myriadcode --no-open  start without opening a browser
 
-myriadcode service install    run it as a systemd user service: starts at
-                              login, restarts on failure, survives closing
-                              the terminal it was started from
+myriadcode service install    run it as a systemd user service: survives
+                              closing the terminal it was started from and
+                              restarts on failure. It does not start at login.
 myriadcode service uninstall  remove that again
+myriadcode service autostart on|off
+                              whether the service also starts at login (off
+                              after a fresh install)
 
 Ctrl-C stops a server started in this terminal. Use `myriadcode stop` for one
 started somewhere else. Both let the server shut down cleanly; kill -9 does not.

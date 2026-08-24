@@ -195,12 +195,19 @@ them by itself if they are there.
 Add your API key on the home page (or set `DEEPSEEK_API_KEY`, which wins), pick
 a project directory, and create a session.
 
-A server started in a terminal dies with that terminal, and one started by hand
-does not come back after a reboot — both of which are found out the slow way,
-by going to open the app and finding nothing there. `myriadcode service install`
-writes a systemd user unit that starts at login and restarts on failure; after
-that `myriadcode`, `stop` and `restart` all drive the service rather than
-running a second copy. `myriadcode service uninstall` removes it.
+A server started in a terminal dies with that terminal, which is found out the
+slow way: by going back to the app and finding nothing there.
+`myriadcode service install` writes a systemd user unit so the server outlives
+its terminal and comes back if it crashes; after that `myriadcode`, `stop` and
+`restart` all drive the service rather than running a second copy.
+`myriadcode service uninstall` removes it.
+
+Installing does **not** make it start at login. A machine that boots with the
+server already up answers "already running" to somebody who has only just sat
+down and asked for it, which reads as the app having started itself behind their
+back — and it costs a loaded whisper model and an open database to nobody.
+`myriadcode service autostart on` opts in; `off` turns it back off without
+stopping the server you are using.
 
 > **This is a single-user tool with no authentication.** It reads and writes
 > anywhere your user account can and runs arbitrary shell commands. Bind it to
