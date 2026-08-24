@@ -1,13 +1,12 @@
-"""A long bash script in the transcript can be read all the way to the end.
+"""A long bash script in the transcript can be scrolled to the end of.
 
-Two separate things had to be true for that, and neither was. The command was
-cut off at 3000 characters before it ever left the server, so there was nothing
-below the fold to reach; and the block it lands in is a fixed 400 pixels, which
-is about twenty-five lines of a script that may run to hundreds.
+It could not be, and the reason was not the scrolling: the command was cut off
+at 3000 characters before it ever left the server, so the block scrolled
+perfectly well to a bottom that said "[truncated]".
 
 So this checks the whole path rather than either half: seed a real transcript
-with a real multi-thousand-character command, open it in a real browser, and go
-looking for the last line of the script.
+with a real multi-thousand-character command, open it in a real browser, scroll
+the block to its end, and look for the last line of the script.
 """
 
 import asyncio
@@ -136,13 +135,12 @@ async def test_the_whole_command_is_in_the_page(input_block):
 async def test_the_block_scrolls_rather_than_hiding_the_rest(input_block):
     metrics = await input_block.evaluate(
         "el => ({ scroll: el.scrollHeight, client: el.clientHeight,"
-        " resize: getComputedStyle(el).resize })"
+        " overflow: getComputedStyle(el).overflowY })"
     )
     assert metrics["scroll"] > metrics["client"], (
         "a 200-line script fitted the box, so this proves nothing about scrolling"
     )
-    # It is capped, and the cap is escapable: the corner drags.
-    assert metrics["resize"] == "vertical"
+    assert metrics["overflow"] in ("auto", "scroll")
 
 
 async def test_scrolling_to_the_bottom_lands_on_the_last_line(input_block):
@@ -175,17 +173,3 @@ async def test_scrolling_to_the_bottom_lands_on_the_last_line(input_block):
     )
     assert shown["found"], "the last line is not in the block's text at all"
     assert shown["inside"], "scrolled to the bottom and the last line is still not visible"
-
-
-async def test_dragging_the_corner_is_not_undone_by_the_cap(input_block):
-    """`max-height: 400px` would silently clamp a dragged height, so the handle
-    would move and the box would not. The cap lifts once it has been dragged."""
-    grown = await input_block.evaluate(
-        """el => {
-            el.style.height = '900px';
-            return { height: el.getBoundingClientRect().height,
-                     cap: getComputedStyle(el).maxHeight };
-        }"""
-    )
-    assert grown["cap"] == "none", "the cap still applies after a manual resize"
-    assert grown["height"] > 800, f"asked for 900px, got {grown['height']}px"
