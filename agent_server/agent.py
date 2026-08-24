@@ -992,6 +992,15 @@ async def _drain_pending(session: dict, ctx: ToolContext) -> AsyncIterator[dict]
                     yield event
             result = await task
         except asyncio.CancelledError:
+            # Cancel the work as well as the wait. `request_abort` cancels this
+            # task directly, so it is usually already done -- but a cancel that
+            # arrives from outside (the session being deleted, shutdown running
+            # out of patience) interrupts the *await* and leaves the tool
+            # running. For bash that means a script carrying on against a
+            # transcript that has stopped listening, with nothing left holding a
+            # reference to kill it. Cancelling here is what reaches the
+            # subprocess: run_bash kills its whole process group on the way out.
+            task.cancel()
             result = ToolResult.error("cancelled by user", "cancelled")
             await _record(session_id, call, result, 0)
             if not ctx.abort.is_set():
@@ -1207,26 +1216,35 @@ async def _run_batch(
     outcomes: dict[str, tuple[ToolResult, int]] = {}
     interrupted = False
     waiting = set(tasks)
-    while waiting:
-        done, waiting = await asyncio.wait(
-            waiting, timeout=_PROGRESS_POLL_SEC, return_when=asyncio.FIRST_COMPLETED
-        )
-        # Output from calls that are still running, before the results of the
-        # ones that just finished -- otherwise a block's last frame of output
-        # would arrive after it had already been marked complete.
-        for event in _progress_events(progress):
-            yield event
-        for task in done:
-            call = call_of[task]
-            try:
-                result, elapsed_ms = task.result()
-            except asyncio.CancelledError:
-                result, elapsed_ms = ToolResult.error("cancelled by user", "cancelled"), 0
-                # A stop sets the abort flag first. A cancel without it is a
-                # real interruption and still has to reach the caller.
-                interrupted = interrupted or not ctx.abort.is_set()
-            outcomes[call["id"]] = (result, elapsed_ms)
-            yield _tool_end_event(call, tool_call_name(call), result, elapsed_ms)
+    try:
+        while waiting:
+            done, waiting = await asyncio.wait(
+                waiting, timeout=_PROGRESS_POLL_SEC, return_when=asyncio.FIRST_COMPLETED
+            )
+            # Output from calls that are still running, before the results of the
+            # ones that just finished -- otherwise a block's last frame of output
+            # would arrive after it had already been marked complete.
+            for event in _progress_events(progress):
+                yield event
+            for task in done:
+                call = call_of[task]
+                try:
+                    result, elapsed_ms = task.result()
+                except asyncio.CancelledError:
+                    result, elapsed_ms = ToolResult.error("cancelled by user", "cancelled"), 0
+                    # A stop sets the abort flag first. A cancel without it is a
+                    # real interruption and still has to reach the caller.
+                    interrupted = interrupted or not ctx.abort.is_set()
+                outcomes[call["id"]] = (result, elapsed_ms)
+                yield _tool_end_event(call, tool_call_name(call), result, elapsed_ms)
+    except asyncio.CancelledError:
+        # Same reason as the single-call path: a cancel delivered to this
+        # coroutine interrupts the wait, not the batch. Without this the calls
+        # still waiting on it -- a bash among them -- keep running with nobody
+        # left to collect or kill them.
+        for task in waiting:
+            task.cancel()
+        raise
 
     # Every call must end up with a result, including the cancelled ones.
     # An unanswered tool call is picked up as pending work and re-run on the

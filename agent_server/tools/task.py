@@ -406,7 +406,19 @@ async def _run(ctx: ToolContext, description: str, prompt: str, title: str, tool
                     owner = False
                 # shield: one sibling's timeout must not cancel the shared call
                 # out from under the others awaiting it.
-                result = await asyncio.shield(task)
+                try:
+                    result = await asyncio.shield(task)
+                except asyncio.CancelledError:
+                    # The shield exists to protect a shared call from one
+                    # sibling giving up on it, not from the user stopping the
+                    # run. Without this a stop unwound every subagent and left
+                    # the shared call running behind the shield -- for bash,
+                    # a script still executing with nothing left that could
+                    # report on it or kill it, which is exactly what "stop"
+                    # is supposed to prevent.
+                    if ctx.abort.is_set():
+                        task.cancel()
+                    raise
             else:
                 result = await execute_tool(tool_name, tool_args, child_ctx, allowed=tool_names)
             # Only the subagent that actually ran the call records its usage, so
