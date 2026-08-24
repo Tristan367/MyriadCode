@@ -338,6 +338,31 @@ def _tool_input_text(name: str, args: dict) -> str | None:
     return "\n\n".join(parts) or None
 
 
+# How much of a call's input the transcript will show.
+#
+# This used to be 3000 characters, which is about sixty lines -- so a bash call
+# carrying a heredoc, which is how a model writes anything longer than a
+# one-liner, was cut off mid-script with no way to see the rest. Expanding the
+# row and scrolling to the bottom found "[truncated]" and nothing else: the
+# missing part had never been sent to the browser, so there was nothing there
+# to scroll to.
+#
+# 20,000 matches the cap on displayed file contents, and it is a guard against a
+# pathological argument rather than a budget: it is past anything a model emits
+# in a single call, so in practice the whole input is shown and the block's own
+# scrollbar is what gets you through it.
+MAX_TOOL_INPUT_CHARS = 20_000
+
+
+def _clip_input(text: str) -> str:
+    if len(text) <= MAX_TOOL_INPUT_CHARS:
+        return text
+    # Say how much is missing. "[truncated]" alone leaves the reader unable to
+    # tell a dozen cut lines from a thousand.
+    dropped = len(text) - MAX_TOOL_INPUT_CHARS
+    return f"{text[:MAX_TOOL_INPUT_CHARS]}\n\u2026 [truncated in view: {dropped:,} more characters]"
+
+
 def _tool_inputs(messages: list[dict]) -> dict[str, str]:
     """Map tool_call_id to the call's input, for display in the transcript."""
     inputs: dict[str, str] = {}
@@ -351,9 +376,7 @@ def _tool_inputs(messages: list[dict]) -> dict[str, str]:
             text = _tool_input_text(tool_call_name(call), parse_arguments(call))
             if not text:
                 continue
-            if len(text) > 3000:
-                text = text[:3000] + "\n\u2026 [truncated]"
-            inputs[cid] = text
+            inputs[cid] = _clip_input(text)
     return inputs
 
 

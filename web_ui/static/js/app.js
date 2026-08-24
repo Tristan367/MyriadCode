@@ -1953,11 +1953,24 @@ function toolInputText(name, args) {
     .join('\n\n');
 }
 
+/* Kept in step with MAX_TOOL_INPUT_CHARS in routes/context.py, which is what
+ * the same rows look like after a reload.
+ *
+ * It was 3000, about sixty lines, so a bash call carrying a heredoc -- how a
+ * model writes any script longer than a one-liner -- was cut off partway with
+ * nothing to scroll to: the rest had never been put in the page. This is a
+ * guard against a pathological argument rather than a budget, so in practice
+ * the whole command is here and the block's own scrollbar reaches all of it. */
+const MAX_TOOL_INPUT_CHARS = 20000;
+
 function formatToolInput(name, args) {
   if (!args || !Object.keys(args).length) return null;
   const text = toolInputText(name, args);
   if (!text) return null;
-  return text.length > 3000 ? text.slice(0, 3000) + '\n\u2026 [truncated]' : text;
+  if (text.length <= MAX_TOOL_INPUT_CHARS) return text;
+  const dropped = (text.length - MAX_TOOL_INPUT_CHARS).toLocaleString();
+  return text.slice(0, MAX_TOOL_INPUT_CHARS) +
+    `\n\u2026 [truncated in view: ${dropped} more characters]`;
 }
 
 function appendToolInput(details, name, args) {

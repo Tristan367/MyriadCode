@@ -848,7 +848,17 @@ a.file-ref:hover { border-bottom-style: solid; color: var(--text); background: v
   overflow: auto;
   white-space: pre-wrap;
   font-size: 11.5px;
+  /* 400px is about twenty-five lines, which is a reasonable default for a
+     command's output and a poor one for a three-hundred-line script. Drag the
+     corner and it grows. */
+  resize: vertical;
 }
+/* Dragging the handle writes an inline `height`, which `max-height: 400px`
+   would then quietly clamp -- the grabber would move and the box would not.
+   Lift the cap once it has been dragged, so the height asked for is the height
+   given. Nothing else sets an inline style on these blocks, so the presence of
+   one means the user did it by hand. */
+.tool-raw[style*="height"] { max-height: none; }
 /* Read contents render as highlighted code: no wrapping, full-brightness base
    text so the token colours read against it. */
 .tool-raw code { white-space: pre; color: var(--text); }

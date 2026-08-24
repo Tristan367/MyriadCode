@@ -212,3 +212,58 @@ def test_only_the_first_line_of_a_multi_line_argument_reaches_the_title():
     title = _arg_summary("deploy", {"script": "set -e\nrm -rf /"})
     assert "set -e" in title
     assert "rm -rf" not in title, "a title is one line; the rest is in the body"
+
+
+# ── How much of a call's input reaches the page ──────────────────────────────
+#
+# The transcript's copy of what was sent used to stop at 3000 characters, about
+# sixty lines. A model writing anything longer than a one-liner writes a
+# heredoc, so bash calls hit that constantly -- and the row could not be scrolled
+# to the rest, because the rest had never been sent to the browser. What looked
+# like a UI that would not scroll was a UI with nothing left to scroll to.
+
+def _tool_call(name: str, args: dict) -> dict:
+    return {
+        "role": "assistant",
+        "id": 1,
+        "tool_calls": [{
+            "id": "call-1",
+            "type": "function",
+            "function": {"name": name, "arguments": json.dumps(args)},
+        }],
+    }
+
+
+def test_a_long_script_reaches_the_page_whole():
+    from agent_server.routes.context import _tool_inputs
+
+    script = "\n".join(f"echo 'step {i:04d} of a long deployment script'" for i in range(150))
+    command = f"cat <<'EOF' > deploy.sh\n{script}\nEOF\nbash deploy.sh"
+    assert len(command) > 3000, "the fixture has to be past the cap that used to apply"
+
+    shown = _tool_inputs([_tool_call("bash", {"command": command})])["call-1"]
+    assert "truncated" not in shown, "a script this size is ordinary, not pathological"
+    assert "step 0149" in shown, "the last line of the script never arrived"
+    assert shown == command
+
+
+def test_a_pathological_input_says_how_much_is_missing():
+    from agent_server.routes.context import MAX_TOOL_INPUT_CHARS, _tool_inputs
+
+    command = "x" * (MAX_TOOL_INPUT_CHARS + 5000)
+    shown = _tool_inputs([_tool_call("bash", {"command": command})])["call-1"]
+    # "[truncated]" on its own leaves the reader unable to tell a dozen missing
+    # lines from a thousand.
+    assert "5,000 more characters" in shown
+
+
+def test_the_cap_is_the_same_in_the_browser_as_on_the_server():
+    """A row is drawn by app.js while it streams and by the server after a
+    reload. Two different caps would mean a command that was complete on screen
+    became truncated by refreshing the page."""
+    from agent_server.routes.context import MAX_TOOL_INPUT_CHARS
+
+    source = (REPO / "web_ui" / "static" / "js" / "app.js").read_text()
+    match = re.search(r"const MAX_TOOL_INPUT_CHARS = (\d+);", source)
+    assert match, "app.js no longer declares MAX_TOOL_INPUT_CHARS"
+    assert int(match.group(1)) == MAX_TOOL_INPUT_CHARS
