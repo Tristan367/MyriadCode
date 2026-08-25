@@ -196,7 +196,7 @@ async def resolve(session_id: str, request: Request, body: ResolveRequest):
 
     ok = await agent.resolve_pending(
         session_id, body.tool_call_id, body.action, body.value,
-        scope=body.scope, grant_path=body.grant_path,
+        scope=body.scope, grant_path=body.grant_path, note=body.note,
     )
     if not ok:
         raise HTTPException(409, "That tool call is no longer pending.")

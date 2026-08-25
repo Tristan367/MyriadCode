@@ -16,7 +16,7 @@ import re
 from datetime import datetime
 from pathlib import Path
 
-from agent_server import agent, permissions
+from agent_server import agent, measure, permissions
 from agent_server import database as db
 from agent_server.compaction import should_offer_compaction, tail_budget
 from agent_server.config import (
@@ -448,6 +448,18 @@ def _effort_chip(session: dict) -> dict:
 
 async def _session_context(session: dict) -> dict:
     usage = await db.get_session_usage(session["id"])
+    # `get_session_usage` reports the prompt size of the last *completed*
+    # request, which is one round behind and misses everything that round
+    # produced -- its thinking, its tool calls, and the results those returned.
+    # On a small window that is most of the difference between the ring being
+    # useful and being wrong: it read 50% while a round streamed and 17% the
+    # moment the turn paused, having measured a request that no longer existed.
+    measured = await measure.next_prompt_tokens(session)
+    if measured is not None:
+        usage = {**usage, "context": measured}
+        usage["percent"] = (
+            round(100 * measured / usage["threshold"], 1) if usage["threshold"] else 0
+        )
     rows = await db.get_recent_messages(session["id"], TRANSCRIPT_WINDOW + _INPUT_LOOKBEHIND)
     messages = rows[-TRANSCRIPT_WINDOW:] if len(rows) > TRANSCRIPT_WINDOW else rows
     _apply_transcript_hiding(messages, await _hide_tool_calls(), await _hide_thinking())

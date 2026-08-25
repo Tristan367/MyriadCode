@@ -21,7 +21,7 @@ from collections.abc import AsyncIterator
 from dataclasses import replace
 from datetime import UTC, datetime
 
-from agent_server import cache_guard, permissions
+from agent_server import cache_guard, measure, permissions
 from agent_server import database as db
 from agent_server.config import (
     CACHE_WARN_TOKENS,
@@ -82,6 +82,13 @@ _approved_calls: dict[str, set[str]] = {}
 # stored here by resolve_pending(), injected into bash args in _drain_pending(),
 # and discarded immediately after use.
 _sudo_passwords: dict[str, dict[str, str]] = {}  # {session_id: {tool_call_id: password}}
+
+# A note the user attached while approving a call. Approving used to be a bare
+# yes, so the only way to say "fine, but not like that" was to let the call run
+# and then interrupt -- by which point the model has a result to reason from
+# and the moment has passed. Delivered on the call's own result, so it arrives
+# attached to the thing it is about.
+_approval_notes: dict[str, dict[str, str]] = {}  # {session_id: {tool_call_id: note}}
 
 # Per-session history of recent tool rounds, for doom-loop detection. Each
 # entry is the set of (name, args_json) keys issued on one assistant turn.
@@ -363,6 +370,7 @@ def forget_session(session_id: str):
     _doom_recorded.pop(session_id, None)
     _approved_calls.pop(session_id, None)
     _sudo_passwords.pop(session_id, None)
+    _approval_notes.pop(session_id, None)
     _compaction_snoozed.discard(session_id)
     _cache_warning_ack.discard(session_id)
     _runtime_auto_approve.discard(session_id)
@@ -646,7 +654,9 @@ async def _loop(
             echo_reasoning=getattr(provider, "echoes_reasoning", True),
         )
         fp_tokens = cache_guard.slot_tokens(provider, tools, messages)
-        prompt_tokens = sum(fp_tokens)
+        # Same arithmetic the header uses, from one definition -- see
+        # measure.py for what happened when there were two.
+        prompt_tokens = measure.prompt_tokens(provider, tools, messages)
         window = model_info(session["model"])["context"]
 
         # Compact at a clean turn boundary, before spending another full-context
@@ -1110,6 +1120,11 @@ async def _drain_pending(session: dict, ctx: ToolContext) -> AsyncIterator[dict]
             yield _tool_end_event(call, name, result, 0)
             continue
 
+        # Taken before the tool runs, applied to whatever it returns. Pulled
+        # here rather than at approval time because the call may not run for a
+        # while, and it must not leak into a later call with the same id.
+        note = (_approval_notes.get(session_id) or {}).pop(call["id"], "")
+
         began = time.monotonic()
         progress: asyncio.Queue = asyncio.Queue(maxsize=_PROGRESS_QUEUE_MAX)
         call_ctx = replace(ctx, call_id=call["id"], progress=progress)
@@ -1138,8 +1153,25 @@ async def _drain_pending(session: dict, ctx: ToolContext) -> AsyncIterator[dict]
             yield _tool_end_event(call, name, result, 0)
             continue
         elapsed_ms = int((time.monotonic() - began) * 1000)
+        result = _with_approval_note(result, note)
         await _record(session_id, call, result, elapsed_ms)
         yield _tool_end_event(call, name, result, elapsed_ms)
+
+
+def _with_approval_note(result: ToolResult, note: str) -> ToolResult:
+    """Carry what the user said while approving into the call's own result.
+
+    On the result rather than as a separate message, because a note about a
+    command belongs beside that command's output -- and because inserting a
+    user message between an assistant's tool_calls and their results is exactly
+    the shape the API rejects.
+    """
+    if not note.strip():
+        return result
+    return replace(
+        result,
+        output=f"{result.output}\n\n[The user approved this and added: {note.strip()}]",
+    )
 
 
 async def _gate(
@@ -1426,10 +1458,14 @@ async def resolve_pending(
     value: str = "",
     scope: str = "once",
     grant_path: str = "",
+    note: str = "",
 ) -> bool:
     """Answer one paused tool call so the loop can continue.
 
     action: "approve" | "reject" | "answer"
+    `note` is what the user said while deciding -- "fine, but use staging", or
+    "we don't need ffmpeg for this". It is separate from `value` because on a
+    sudo prompt `value` is the password, and the two must never be confused.
     Returns False if the id is not actually pending (double submit, stale UI).
     """
     session = await db.get_session(session_id)
@@ -1451,6 +1487,8 @@ async def resolve_pending(
         # Don't run it here. Marking it approved lets the agent loop execute it
         # and stream tool_start/tool_end, so the user sees the result.
         _approved_calls.setdefault(session_id, set()).add(tool_call_id)
+        if note.strip():
+            _approval_notes.setdefault(session_id, {})[tool_call_id] = note.strip()
         # Sudo password: store it for one-shot injection into the bash call.
         if "sudo" in (parse_arguments(call).get("command", "")):
             _sudo_passwords.setdefault(session_id, {})[tool_call_id] = value
@@ -1459,7 +1497,10 @@ async def resolve_pending(
     if action == "reject":
         # Feed the refusal back as a normal tool result. The model can then adapt
         # instead of the conversation dead-ending on an unanswered tool call.
-        note = value.strip()
+        # `value` is where the reason used to arrive, from the modal that asked
+        # for one after the fact; the card carries it in `note` now, and both
+        # are accepted so an older page open in a tab still works.
+        note = (note or value).strip()
         result = ToolResult(
             output="The user rejected this tool call and it was not executed."
                    + (f" They said: {note}" if note else "")

@@ -941,6 +941,31 @@ a.file-ref:hover { border-bottom-style: solid; color: var(--text); background: v
 }
 .permission-dir { font-size: 11px; font-family: var(--mono); color: var(--text-faint); margin-bottom: 10px; }
 
+/* Sits between the command and the buttons, because it is filled in before a
+   decision rather than after one. */
+.permission-note {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  margin-bottom: 10px;
+  padding: 6px 9px;
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 12.5px;
+}
+.permission-note::placeholder { color: var(--text-faint); }
+.permission-note:focus { outline: none; border-color: var(--accent-dim); }
+/* What was said, kept in the transcript beside the rejection it explains. */
+.permission-note-said {
+  margin-top: 3px;
+  color: var(--text-dim);
+  font-size: 12px;
+  font-style: italic;
+}
+
 .permission-actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
 
 
@@ -2562,6 +2587,12 @@ dialog.file-browser::backdrop { background: transparent; }
   padding: 9px 10px 8px;
   border-bottom: 1px solid var(--border);
 }
+.fb-side-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
 .fb-side-title {
   font-family: var(--sans);
   font-size: 10.5px;
@@ -2707,23 +2738,44 @@ dialog.file-browser::backdrop { background: transparent; }
   cursor: pointer;
 }
 .fb-side-clear:hover { color: var(--text); background: var(--bg-hover); }
-/* A full-height hairline that widens into a grab strip on hover. */
+/* Collapse sits on the header line beside the title, where a panel's own
+   controls belong -- not as a full-height strip down the middle of the dialog,
+   which was a very large target for a very small job. */
 .fb-side-toggle {
   flex: 0 0 auto;
-  width: 11px;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--text-faint);
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+}
+.fb-side-toggle:hover { background: var(--bg-hover); color: var(--text); }
+
+/* Collapsed, the sidebar becomes this: a hairline with an arrow on it, which
+   is the only way back and so must stay visible. */
+.fb-side-peek {
+  display: none;
+  flex: 0 0 auto;
+  width: 14px;
   padding: 0;
   border: 0;
   border-right: 1px solid var(--border);
   background: var(--bg-inset);
   color: var(--text-faint);
-  font-size: 10px;
+  font-size: 11px;
   line-height: 1;
   cursor: pointer;
 }
-.fb-side-toggle:hover { background: var(--bg-hover); color: var(--text); }
+.fb-side-peek:hover { background: var(--bg-hover); color: var(--text); }
 .fb-side-collapsed .fb-side { display: none; }
+.fb-side-collapsed .fb-side-peek { display: block; }
 .fb-no-side .fb-side,
-.fb-no-side .fb-side-toggle { display: none; }
+.fb-no-side .fb-side-peek { display: none; }
 
 .fb-list { flex: 1 1 auto; overflow: auto; padding: 4px 0; min-width: 0; }
 .fb-row {

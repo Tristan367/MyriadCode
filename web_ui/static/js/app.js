@@ -439,7 +439,7 @@ async function onSubmit(event) {
 }
 
 /* Resume the loop after the user answers a paused tool call. */
-async function resolveToolCall(toolCallId, action, value, scope, grantPath) {
+async function resolveToolCall(toolCallId, action, value, scope, grantPath, note) {
   if (App.streaming) return;
   await streamRequest(`/api/sessions/${App.sessionId}/resolve`, {
     method: 'POST',
@@ -450,6 +450,8 @@ async function resolveToolCall(toolCallId, action, value, scope, grantPath) {
       value: value || '',
       scope: scope || 'once',
       grant_path: grantPath || '',
+      // Separate from `value`, which on a sudo prompt is the password.
+      note: note || '',
     }),
   });
 }
@@ -2195,17 +2197,33 @@ function appendPermissionCard(event) {
     );
   }
 
-  async function reject() {
-    const why = await ui.prompt('Optional: tell the agent why, so it can try something else.', {
-      title: 'Reject this call',
-      placeholder: 'e.g. use the staging database instead',
-      confirmLabel: 'Reject',
+  /* A note attached to the decision, whichever way it goes.
+   *
+   * Rejecting used to open a modal asking why, and approving had nowhere to
+   * say anything at all -- so "yes, but we don't need ffmpeg for this" meant
+   * approving, waiting, and then interrupting, by which point the model has a
+   * result to reason from and has moved on. One box, filled in before either
+   * button, is the whole feature. */
+  let noteEl = null;
+  if (kind !== 'denied') {
+    noteEl = el('input', 'permission-note');
+    noteEl.type = 'text';
+    noteEl.placeholder = 'Optional note to the agent — sent with either answer';
+    noteEl.spellcheck = false;
+    // Enter in the note takes the safe option. Approving on a keystroke inside
+    // a text box is not something to do by accident.
+    noteEl.addEventListener('keydown', (e) => {
+      if (e.key !== 'Enter') return;
+      e.preventDefault();
+      reject();
     });
-    if (why === null) return;
-    finish('reject', why, 'once');
   }
+  function noteText() { return noteEl ? noteEl.value.trim() : ''; }
+
+  function reject() { finish('reject', '', 'once'); }
 
   function finish(action, value, scope) {
+    const note = noteText();
     if (action === 'approve') {
       // The tool call bubble that follows already shows the command, so an
       // "Approved" card is pure noise taking up several lines.
@@ -2223,13 +2241,18 @@ function appendPermissionCard(event) {
       const body = el('div', 'msg-content');
       body.appendChild(el('div', 'content-text',
         `Rejected: ${truncate(event.command || event.path || 'tool call', 90)}`));
+      // Keep the note on screen. It is the part explaining why, and a line
+      // that only says "Rejected: ffmpeg -version" reads, later, as a decision
+      // nobody remembers making.
+      if (note) body.appendChild(el('div', 'permission-note-said', `You said: ${note}`));
       node.appendChild(body);
     }
     if (scope === 'session') markAutoApprove(true);
-    resolveToolCall(event.tool_call_id, action, value, scope, event.scope);
+    resolveToolCall(event.tool_call_id, action, value, scope, event.scope, note);
   }
 
-  node.append(head, detail, sub, ...(pwWrap ? [pwWrap] : []), actions);
+  node.append(head, detail, sub, ...(pwWrap ? [pwWrap] : []),
+              ...(noteEl ? [noteEl] : []), actions);
   appendRow(node);
   autoscroll();
   actions.querySelector('button')?.focus();
@@ -6002,11 +6025,6 @@ const FileBrowser = (() => {
   function applySideVisibility() {
     if (!dlg) return;
     dlg.classList.toggle('fb-side-collapsed', placesHidden());
-    const btn = dlg.querySelector('[data-fb=toggleside]');
-    if (btn) {
-      btn.textContent = placesHidden() ? '›' : '‹';
-      btn.title = placesHidden() ? 'Show places' : 'Hide places';
-    }
   }
 
   function ensure() {
@@ -6030,7 +6048,11 @@ const FileBrowser = (() => {
       '<div class="fb-body">' +
         '<aside class="fb-side">' +
           '<div class="fb-side-head">' +
-            '<span class="fb-side-title">Places</span>' +
+            '<div class="fb-side-top">' +
+              '<span class="fb-side-title">Places</span>' +
+              '<button type="button" class="fb-side-toggle" data-fb="toggleside" ' +
+                'title="Hide places">&#171;</button>' +
+            '</div>' +
             '<div class="fb-side-modes" role="tablist">' +
               '<button type="button" class="fb-mode" data-mode="recent" ' +
                 'title="Most recently opened first">Recent</button>' +
@@ -6042,8 +6064,11 @@ const FileBrowser = (() => {
           '<button type="button" class="fb-side-clear" data-fb="clearplaces" ' +
             'title="Forget every directory this session has visited">Clear history</button>' +
         '</aside>' +
-        '<button type="button" class="fb-side-toggle" data-fb="toggleside" ' +
-          'title="Show or hide places"></button>' +
+        // The collapsed state: a narrow strip that is the only way back. It
+        // replaces the sidebar rather than sitting beside it, so there is
+        // exactly one control on screen at a time.
+        '<button type="button" class="fb-side-peek" data-fb="showside" ' +
+          'title="Show places">&#187;</button>' +
         '<div class="fb-list"></div>' +
       '</div>' +
       '<div class="fb-pick" hidden>' +
@@ -6085,10 +6110,12 @@ const FileBrowser = (() => {
         renderPlaces();
       });
     });
-    dlg.querySelector('[data-fb=toggleside]').addEventListener('click', () => {
-      setStored(PLACES_HIDDEN_KEY, placesHidden() ? '0' : '1');
-      applySideVisibility();
-    });
+    for (const sel of ['[data-fb=toggleside]', '[data-fb=showside]']) {
+      dlg.querySelector(sel).addEventListener('click', () => {
+        setStored(PLACES_HIDDEN_KEY, placesHidden() ? '0' : '1');
+        applySideVisibility();
+      });
+    }
     dlg.querySelector('[data-fb=clearplaces]').addEventListener('click', async () => {
       places = { recent: [], frequent: [] };
       renderPlaces();

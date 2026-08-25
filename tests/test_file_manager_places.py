@@ -296,15 +296,22 @@ async def test_hiding_the_sidebar_gives_the_listing_the_space(page):
     before = await page.evaluate(
         "() => document.querySelector('.fb-list').getBoundingClientRect().width")
 
+    # Collapse from the control on the panel's own header line.
     await page.click("[data-fb=toggleside]")
     await page.wait_for_timeout(250)
 
     after = await page.evaluate("""
         () => ({ width: document.querySelector('.fb-list').getBoundingClientRect().width,
-                 sideShown: document.querySelector('.fb-side').offsetParent !== null })
+                 sideShown: document.querySelector('.fb-side').offsetParent !== null,
+                 peekShown: document.querySelector('.fb-side-peek').offsetParent !== null,
+                 peekWidth: document.querySelector('.fb-side-peek').getBoundingClientRect().width })
     """)
     assert not after["sideShown"]
     assert after["width"] > before + 100, (before, after["width"])
+    # Collapsed leaves a sliver, which is the only way back and so has to be
+    # both visible and small.
+    assert after["peekShown"], "collapsing hid the control that expands it again"
+    assert after["peekWidth"] <= 20, after["peekWidth"]
 
     # And the choice survives closing and reopening the manager.
     await page.evaluate("() => { document.getElementById('file-browser').close(); }")
@@ -312,4 +319,33 @@ async def test_hiding_the_sidebar_gives_the_listing_the_space(page):
     await page.wait_for_timeout(400)
     assert await page.evaluate(
         "() => document.querySelector('.fb-side').offsetParent === null")
-    await page.click("[data-fb=toggleside]")
+
+    await page.click("[data-fb=showside]")
+    await page.wait_for_timeout(250)
+    assert await page.evaluate(
+        "() => document.querySelector('.fb-side').offsetParent !== null")
+
+
+async def test_the_collapse_control_sits_on_the_header_line(page):
+    """It was a full-height strip down the middle of the dialog: an enormous
+    target for a very small job, and it read as a divider rather than a
+    button."""
+    boxes = await page.evaluate("""
+        () => {
+          const btn = document.querySelector('[data-fb=toggleside]');
+          const title = document.querySelector('.fb-side-title');
+          const side = document.querySelector('.fb-side');
+          const b = btn.getBoundingClientRect(), t = title.getBoundingClientRect();
+          const s = side.getBoundingClientRect();
+          const mid = (r) => r.top + r.height / 2;
+          return { sameLine: Math.abs(mid(b) - mid(t)) <= 3,
+                   toTheRight: b.left > t.right,
+                   heightShare: b.height / s.height,
+                   inSidebar: side.contains(btn) };
+        }
+    """)
+    assert boxes["inSidebar"], "the control is not part of the panel it controls"
+    assert boxes["sameLine"], "not on the same line as the Places title"
+    assert boxes["toTheRight"], "not at the right-hand end of that line"
+    assert boxes["heightShare"] < 0.1, (
+        f"the button is {boxes['heightShare']:.0%} of the sidebar's height")

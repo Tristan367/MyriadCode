@@ -269,3 +269,65 @@ def test_the_effort_chip_does_not_claim_a_setting_that_is_not_sent():
     assert chosen["muted"]
     # And it says where the setting does work, which is at launch.
     assert "chat-template-kwargs" in chosen["title"]
+
+
+# ── the header and the loop must agree ──────────────────────────────────────
+
+async def test_the_header_measures_the_next_request_not_the_last_one(session, monkeypatch):
+    """The 50%-then-17% report.
+
+    The ring climbed to 50% while a round streamed and dropped to 17% the
+    moment the turn paused and the header refreshed. Nothing had shrunk: the
+    live figure measured the request about to be sent, and the header read the
+    prompt size of the request *before* it -- which knew nothing about the ten
+    thousand tokens of thinking that round had just produced, nor about the
+    tool results sitting after it.
+    """
+    from agent_server import measure
+
+    remember_endpoint_context("custom:probe", 43008)
+    provider = _Recorder()
+    monkeypatch.setattr(agent, "get_provider", lambda _p: provider)
+    monkeypatch.setattr("agent_server.measure.get_provider", lambda _p: provider)
+
+    events = [e async for e in agent.run(session["id"])]
+    sent = next(e for e in events if e["type"] == "working")["prompt_tokens"]
+
+    # Everything that round produced is now in the transcript.
+    await db.add_message(session["id"], "assistant", "x" * 40_000,
+                         token_count=10_000)
+
+    fresh = await db.get_session(session["id"])
+    recorded = (await db.get_session_usage(session["id"]))["context"]
+    measured = await measure.next_prompt_tokens(fresh)
+
+    assert measured is not None
+    assert measured > sent, "the measurement ignored what the round added"
+    assert measured > recorded, (
+        f"the recorded figure ({recorded:,}) is behind the real prompt "
+        f"({measured:,}); this is the drop the ring showed"
+    )
+
+
+async def test_the_header_and_the_loop_use_one_definition(session, monkeypatch):
+    """They drifted once and the difference was visible on screen."""
+    from agent_server import measure
+
+    remember_endpoint_context("custom:probe", 43008)
+    provider = _Recorder()
+    monkeypatch.setattr(agent, "get_provider", lambda _p: provider)
+    monkeypatch.setattr("agent_server.measure.get_provider", lambda _p: provider)
+
+    events = [e async for e in agent.run(session["id"])]
+    sent = next(e for e in events if e["type"] == "working")["prompt_tokens"]
+
+    # Measured again straight afterwards, with the assistant's reply now in the
+    # transcript: the difference must be exactly that reply, not a different
+    # way of counting.
+    fresh = await db.get_session(session["id"])
+    after = await measure.next_prompt_tokens(fresh)
+    rows = await db.get_messages(session["id"])
+    reply = next(r for r in reversed(rows) if r["role"] == "assistant")
+    added = provider.count_tokens([{"role": "assistant", "content": reply["content"]}])
+
+    assert abs((after - sent) - added) <= 2, (sent, after, added)

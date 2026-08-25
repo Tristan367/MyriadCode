@@ -47,6 +47,9 @@ class ResolveRequest(BaseModel):
     # directory persistently allow writes under `grant_path`
     scope: Literal["once", "session", "directory"] = "once"
     grant_path: str = ""
+    # What the user said while deciding. Kept apart from `value`, which on a
+    # sudo prompt is the password.
+    note: str = ""
 
 
 class CompactProfileRequest(BaseModel):
