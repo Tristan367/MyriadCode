@@ -250,11 +250,28 @@ async def _summariser_messages(
     The flattened fallback stays only for a head too large to send at all.
     """
     provider = get_provider(session["provider"])
+    earlier = await db.get_compactions(session["id"])
+    if earlier:
+        # Said outright rather than left to be inferred.
+        #
+        # The summary written here *replaces* the earlier ones -- that is what
+        # makes a rolling summary roll rather than a pile of summaries grow --
+        # and the prompt says "summarise this conversation", which the earlier
+        # summaries are part of. A model would probably carry them forward on
+        # that alone. Probably is not the standard for an instruction whose
+        # failure mode is losing the first hour of the session silently, with
+        # nothing to notice it by.
+        instructions += (
+            "\n\nThis conversation opens with summaries of earlier parts of "
+            "itself. Your summary replaces them: carry forward everything in "
+            "them that still matters, so that what you write stands alone as "
+            "the record of the whole session up to this point."
+        )
     # Cut on a unit boundary, so the head always ends with a complete tool round
     # and a user message may legally follow it.
     live = build_messages(
         await session_system_prompt(session),
-        await db.get_compactions(session["id"]),
+        earlier,
         to_compact,
         # The one request that absolutely must fit. Carrying every thinking
         # block of the stretch being summarised into the summariser's own

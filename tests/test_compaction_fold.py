@@ -228,3 +228,51 @@ def test_the_card_does_not_claim_the_conversation_is_that_small():
                 / "web_ui" / "templates" / "chat_messages.html").read_text()
     card = template[template.index("Earlier conversation compacted"):][:400]
     assert "replaced" in card, card
+
+
+async def test_the_summariser_is_told_its_summary_replaces_the_earlier_ones(
+    session, monkeypatch
+):
+    """Folding is only safe if the new summary genuinely carries the old
+    material forward, and that was left to inference: the prompt says
+    "summarise this conversation" and the earlier summaries are part of what it
+    is shown. A model would probably fold them in on that alone. Probably is
+    not the standard for an instruction whose failure mode is losing the first
+    hour of a session silently."""
+    await _turns(session["id"], 10)
+
+    async def fake_summary(*a, **k):
+        yield {"type": "content", "text": "s"}
+        yield {"type": "finish", "reason": "stop"}
+
+    monkeypatch.setattr(compaction, "completion_with_retry",
+                        lambda *a, **k: fake_summary())
+    await db.update_session(session["id"], compact_threshold=8_000)
+    await compaction.compact_session(session["id"])
+    await _turns(session["id"], 10)
+
+    rows = await db.get_messages(session["id"])
+    to_compact, _kept = compaction.split_for_compaction(rows, 2_000)
+    fresh = dict(await db.get_session(session["id"]))
+    messages, _tools, folded = await compaction._summariser_messages(
+        fresh, to_compact, "Summarise this conversation.")
+
+    assert folded
+    asked = "\n".join(str(m.get("content")) for m in messages)
+    assert "replaces them" in asked, (
+        "nothing tells the summariser its summary supersedes the earlier ones"
+    )
+
+
+async def test_a_first_compaction_is_not_told_to_replace_anything(session, monkeypatch):
+    """There is nothing to replace, and an instruction about summaries that do
+    not exist is one more thing for a small model to misread."""
+    await _turns(session["id"], 10)
+    rows = await db.get_messages(session["id"])
+    to_compact, _kept = compaction.split_for_compaction(rows, 2_000)
+
+    messages, _tools, _folded = await compaction._summariser_messages(
+        dict(session), to_compact, "Summarise this conversation.")
+
+    asked = "\n".join(str(m.get("content")) for m in messages)
+    assert "replaces them" not in asked
