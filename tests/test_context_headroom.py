@@ -331,3 +331,46 @@ async def test_the_header_and_the_loop_use_one_definition(session, monkeypatch):
     added = provider.count_tokens([{"role": "assistant", "content": reply["content"]}])
 
     assert abs((after - sent) - added) <= 2, (sent, after, added)
+
+
+async def test_the_window_is_asked_for_before_anything_is_sized_against_it(
+    session, monkeypatch
+):
+    """A custom endpoint's window is only known by asking it.
+
+    Until it is asked, `model_info` returns the 131,072-token default -- and
+    the compaction threshold derived from that came out at 103,220 for a
+    43,008-token model. The ring reported a fifth of the percentage it should,
+    and compaction would not have fired until long after the model had no room
+    left to answer in.
+    """
+    from agent_server import measure
+    from agent_server.config import _ENDPOINT_CONTEXT
+
+    _ENDPOINT_CONTEXT.pop("custom:probe", None)
+
+    asked = []
+
+    class _Endpoint(_Recorder):
+        async def resolve_model(self):
+            asked.append(True)
+            remember_endpoint_context("custom:probe", 43008)
+            return "a-model"
+
+    provider = _Endpoint()
+    monkeypatch.setattr("agent_server.measure.get_provider", lambda _p: provider)
+
+    assert default_compact_threshold(
+        model_info_context("custom:probe"), 8192) > 100_000, "precondition"
+
+    await measure.ensure_window_known(session)
+
+    assert asked, "the endpoint was never asked what window it has"
+    assert model_info_context("custom:probe") == 43008
+    assert default_compact_threshold(43008, 8192) < 30_000
+
+
+def model_info_context(model_id: str) -> int:
+    from agent_server.config import model_info
+
+    return model_info(model_id)["context"]

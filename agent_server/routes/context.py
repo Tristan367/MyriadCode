@@ -447,6 +447,11 @@ def _effort_chip(session: dict) -> dict:
 
 
 async def _session_context(session: dict) -> dict:
+    # Before `get_session_usage`, which derives the compaction threshold from
+    # the model's window: for a custom endpoint that window is only known by
+    # asking, and until it is asked the threshold is computed from the 131K
+    # default rather than the 43K the model was actually loaded with.
+    await measure.ensure_window_known(session)
     usage = await db.get_session_usage(session["id"])
     # `get_session_usage` reports the prompt size of the last *completed*
     # request, which is one round behind and misses everything that round

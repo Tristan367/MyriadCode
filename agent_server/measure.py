@@ -26,6 +26,32 @@ from agent_server.system_prompt import session_system_prompt, session_tool_schem
 log = logging.getLogger(__name__)
 
 
+async def ensure_window_known(session: dict) -> None:
+    """Ask a custom endpoint what context window it was launched with.
+
+    Must happen before anything reads `model_info`, because until it does the
+    window is the 131,072-token default and every number derived from it is
+    wrong: on the endpoint this was written for -- 43,008 -- the compaction
+    threshold came out at 103,220 instead of 28,365, so the ring reported a
+    fifth of the percentage it should and compaction would not have fired
+    until long past the point the model could still answer.
+
+    Cached behind a TTL in the provider, so this is one request every few
+    minutes rather than one per page render. Best-effort: an endpoint that is
+    switched off must not stop the page rendering.
+    """
+    try:
+        provider = get_provider(session.get("provider", ""))
+    except Exception:                                             # noqa: BLE001
+        return
+    if not hasattr(provider, "resolve_model"):
+        return
+    try:
+        await provider.resolve_model()
+    except Exception:                                             # noqa: BLE001
+        log.debug("could not ask %s for its window", provider.name, exc_info=True)
+
+
 def prompt_tokens(provider: Provider, tools: list[dict], messages: list[dict]) -> int:
     """Tokens the given request comes to, tool schemas and system prompt included.
 
@@ -47,14 +73,6 @@ async def next_prompt_tokens(session: dict) -> int | None:
     except Exception:                                             # noqa: BLE001
         return None
     try:
-        # A custom endpoint reports its own context window and it is only known
-        # by asking. Cached behind a TTL inside the provider, so this is one
-        # request every few minutes rather than one per page render -- and
-        # without it the header sizes a 43K window as the 131K default and
-        # reports a third of the percentage it should.
-        if hasattr(provider, "resolve_model"):
-            await provider.resolve_model()
-
         messages = build_messages(
             await session_system_prompt(session),
             await db.get_compactions(session["id"]),

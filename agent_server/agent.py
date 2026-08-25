@@ -601,11 +601,7 @@ async def _loop(
     # below sizes itself against that number -- otherwise the first round after
     # every restart plans against the 131K default for what is, on the machine
     # this was written for, a 43K window, and plans to overrun it.
-    if hasattr(provider, "resolve_model"):
-        try:
-            await provider.resolve_model()
-        except Exception:                                         # noqa: BLE001
-            log.debug("could not ask %s for its context window", provider.name, exc_info=True)
+    await measure.ensure_window_known(session)
 
     # The measured prompt at the last compaction of this run, so a compaction
     # that did not make the request smaller is not tried a second time. See
