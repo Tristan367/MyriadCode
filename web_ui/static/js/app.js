@@ -618,6 +618,7 @@ function handleEvent(event, stream) {
       // yet. Re-show the indicator (cleared above) so a slow connect doesn't
       // read as a hang.
       showStatus('Waiting for the model');
+      beginLiveContext(event);
       break;
 
     case 'reasoning':
@@ -626,6 +627,7 @@ function handleEvent(event, stream) {
         stream.reasoningEl = appendReasoning();
       }
       stream.reasoningEl.textContent += event.text;
+      addLiveOutput(event.text);
       // Left at the top on purpose. Thinking arrives faster than anyone can
       // read it, so chasing the newest token showed a blur of text with the
       // block's own label scrolled off above it. Showing the top means the
@@ -654,6 +656,7 @@ function handleEvent(event, stream) {
         stream.reasoningEl = null;
       }
       stream.text += event.text;
+      addLiveOutput(event.text);
       scheduleRender(stream);
       break;
 
@@ -764,6 +767,16 @@ function handleEvent(event, stream) {
       break;
 
     case 'usage':
+      // The provider's own accounting for the round that just finished.
+      // Better than the estimate that has been driving the ring, so adopt it:
+      // the next round's prompt is this round's prompt plus what it generated,
+      // give or take the tool results still to come.
+      if (Live.active && event.usage) {
+        Live.prompt = (event.usage.prompt_tokens || Live.prompt)
+          + (event.usage.completion_tokens || 0);
+        Live.chars = 0;
+        applyLiveContext();
+      }
       break;
 
     case 'error':
@@ -818,6 +831,100 @@ function flushRender(stream) {
   autoscroll();
 }
 
+/* ── The live context ring ────────────────────────────────────────────────
+ *
+ * The header's ring is rendered server-side from the database, which only
+ * learns the size of a request once that request has finished. A model that
+ * thinks for five minutes therefore left it frozen for five minutes, and on
+ * the first round of a session it read 0% -- not a stale number, but no
+ * number at all, because nothing had completed yet to measure.
+ *
+ * So the server now sends the measured prompt with the `working` event, and
+ * this counts what streams back on top of it. The token figure is an estimate
+ * -- characters over a ratio the server calibrates from real usage -- and it
+ * is replaced by the provider's own accounting the moment the round ends.
+ * That is the right trade for the question being asked of it, which is "is
+ * this going to run out before it finishes?" and wants an answer now rather
+ * than an exact one later.
+ */
+const Live = { prompt: 0, chars: 0, ratio: 4.0, window: 0, active: false };
+
+function beginLiveContext(event) {
+  Live.prompt = event.prompt_tokens || 0;
+  Live.ratio = event.chars_per_token || 4.0;
+  Live.window = event.window || 0;
+  Live.chars = 0;
+  Live.active = Live.prompt > 0;
+  paintLiveContext();
+}
+
+function addLiveOutput(text) {
+  if (!Live.active || !text) return;
+  Live.chars += text.length;
+  paintLiveContext();
+}
+
+function endLiveContext() {
+  Live.active = false;
+}
+
+/* Repainting on every token would be a layout pass per token. One per frame,
+ * at most every quarter second: this is a dial, not a readout. */
+let livePaintQueued = false;
+let lastLivePaintAt = 0;
+const LIVE_PAINT_INTERVAL_MS = 250;
+
+function paintLiveContext() {
+  if (livePaintQueued) return;
+  livePaintQueued = true;
+  requestAnimationFrame(() => {
+    livePaintQueued = false;
+    const now = performance.now();
+    if (now - lastLivePaintAt < LIVE_PAINT_INTERVAL_MS) {
+      setTimeout(paintLiveContext, LIVE_PAINT_INTERVAL_MS - (now - lastLivePaintAt));
+      return;
+    }
+    lastLivePaintAt = now;
+    applyLiveContext();
+  });
+}
+
+function liveTokens() {
+  return Live.prompt + Math.round(Live.chars / (Live.ratio || 4.0));
+}
+
+/* Also called after every htmx swap of #session-meta: the swap replaces the
+ * ring with the server's stale copy, so without this a poll mid-thought would
+ * undo the live figure a few times a minute. */
+function applyLiveContext() {
+  if (!Live.active) return;
+  const meta = document.getElementById('session-meta');
+  const ring = document.querySelector('.context-ring');
+  if (!meta || !ring) return;
+
+  const threshold = Number(meta.dataset.threshold) || 0;
+  const tokens = liveTokens();
+  const percent = threshold ? (100 * tokens) / threshold : 0;
+
+  const fill = ring.querySelector('.ring-fill');
+  if (fill) fill.setAttribute('stroke-dasharray', `${Math.min(percent, 100) * 0.9739} 100`);
+
+  const label = ring.querySelector('.ring-label');
+  if (label) label.textContent = `${Math.round(percent)}%`;
+
+  ring.classList.remove('ring-ok', 'ring-warn', 'ring-danger');
+  ring.classList.add(percent >= 90 ? 'ring-danger' : percent >= 70 ? 'ring-warn' : 'ring-ok');
+
+  // The question during a long thinking block is how much room is left, which
+  // is a token count and not a percentage -- a percentage of the compaction
+  // threshold says nothing about whether the answer will fit in the window.
+  const room = Live.window ? Live.window - tokens : 0;
+  ring.title =
+    `${tokens.toLocaleString()} / ${threshold.toLocaleString()} tokens (${Math.round(percent)}%), live` +
+    (Live.window ? `\nRoom left in the window: ${Math.max(0, room).toLocaleString()}` : '') +
+    '\n\nClick to compact or change the threshold';
+}
+
 let metaTimer = null;
 function setStreaming(active) {
   App.streaming = active;
@@ -830,6 +937,7 @@ function setStreaming(active) {
     }
   } else {
     if (metaTimer) { clearInterval(metaTimer); metaTimer = null; }
+    endLiveContext();
     refreshMeta();
   }
   if (App.els.textarea) {
@@ -3945,7 +4053,11 @@ async function deleteSession(sessionId, name) {
 
 function refreshMeta() {
   if (!App.sessionId) return;
-  htmx.ajax('GET', `/_session_meta/${App.sessionId}`, { target: '#session-meta', swap: 'outerHTML' });
+  htmx.ajax('GET', `/_session_meta/${App.sessionId}`, { target: '#session-meta', swap: 'outerHTML' })
+    // The swap brings back the server's ring, which during a run is a round
+    // behind. Put the live figure back on top of it.
+    .then(() => applyLiveContext())
+    .catch(() => {});
 }
 
 /* ── Tabs ────────────────────────────────────────────────────────────────── */

@@ -20,8 +20,8 @@ class GeminiProvider(OpenAICompatibleProvider):
     settings_key = "gemini_api_key"
     console_url = "aistudio.google.com/apikey"
 
-    def _build_kwargs(self, messages, tools, model, thinking_effort=None):
-        kwargs = super()._build_kwargs(messages, tools, model, thinking_effort)
+    def _build_kwargs(self, messages, tools, model, thinking_effort=None, max_tokens=None):
+        kwargs = super()._build_kwargs(messages, tools, model, thinking_effort, max_tokens)
         # The compatibility layer rejects `stream_options` on some models rather
         # than ignoring it, which fails the whole request. Usage still arrives on
         # the final chunk without it, so it is safe to drop and unsafe to send.

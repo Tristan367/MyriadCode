@@ -369,7 +369,11 @@ async def _run(ctx: ToolContext, description: str, prompt: str, title: str, tool
         )
 
         assistant: dict = {"role": "assistant", "content": content}
-        if reasoning:
+        # A subagent keeps its own conversation in memory and re-sends it every
+        # round, so the same rule applies here as in the main loop: only the
+        # provider that returns a 400 without its thinking back gets to carry
+        # it. See `Provider.echoes_reasoning`.
+        if reasoning and getattr(provider, "echoes_reasoning", True):
             assistant["reasoning_content"] = reasoning
         if calls:
             assistant["tool_calls"] = calls

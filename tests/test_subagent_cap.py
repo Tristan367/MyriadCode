@@ -85,7 +85,8 @@ class _TrivialProvider:
     def count_tokens(self, messages):
         return 1
 
-    async def chat_completion(self, messages, tools, model, thinking_effort=None):
+    async def chat_completion(self, messages, tools, model,
+                              thinking_effort=None, max_tokens=None):
         self.invocations += 1
         await asyncio.sleep(0.01)  # let other tasks enter
         yield {"type": "content", "text": "ok"}
@@ -124,7 +125,8 @@ async def test_count_exceeds_cap_runs_in_batches(fresh, monkeypatch):
     state = {"in_flight": 0, "max_in_flight": 0}
 
     class BatchingProvider(_TrivialProvider):
-        async def chat_completion(self, messages, tools, model, thinking_effort=None):
+        async def chat_completion(self, messages, tools, model,
+                                  thinking_effort=None, max_tokens=None):
             state["in_flight"] += 1
             state["max_in_flight"] = max(state["max_in_flight"], state["in_flight"])
             try:
@@ -154,7 +156,8 @@ async def test_cap_zero_is_unlimited(fresh, monkeypatch):
     state = {"in_flight": 0, "max_in_flight": 0}
 
     class UProvider(_TrivialProvider):
-        async def chat_completion(self, messages, tools, model, thinking_effort=None):
+        async def chat_completion(self, messages, tools, model,
+                                  thinking_effort=None, max_tokens=None):
             state["in_flight"] += 1
             state["max_in_flight"] = max(state["max_in_flight"], state["in_flight"])
             try:
@@ -191,7 +194,8 @@ class _Counting:
     def count_tokens(self, messages):
         return 1
 
-    async def chat_completion(self, messages, tools, model, thinking_effort=None):
+    async def chat_completion(self, messages, tools, model,
+                              thinking_effort=None, max_tokens=None):
         self.state["in_flight"] += 1
         self.state["peak"] = max(self.state["peak"], self.state["in_flight"])
         try:
@@ -280,7 +284,8 @@ class _Hierarchy:
     def count_tokens(self, messages):
         return 1
 
-    async def chat_completion(self, messages, tools, model, thinking_effort=None):
+    async def chat_completion(self, messages, tools, model,
+                              thinking_effort=None, max_tokens=None):
         spawns = any(t["function"]["name"] == "task" for t in tools)
         self.round += 1
         if spawns and self.round == 1:
@@ -452,7 +457,8 @@ async def test_a_shared_tool_result_does_not_outlive_a_write(fresh, monkeypatch)
         def count_tokens(self, messages):
             return 1
 
-        async def chat_completion(self, messages, tools, model, thinking_effort=None):
+        async def chat_completion(self, messages, tools, model,
+                                  thinking_effort=None, max_tokens=None):
             events = self.script[min(self.n, len(self.script) - 1)]
             self.n += 1
             for event in events:
@@ -482,7 +488,8 @@ async def test_spawning_is_never_served_from_the_shared_cache(fresh, monkeypatch
     state = {"in_flight": 0, "peak": 0, "leaves": 0}
 
     class Counting(_Hierarchy):
-        async def chat_completion(self, messages, tools, model, thinking_effort=None):
+        async def chat_completion(self, messages, tools, model,
+                                  thinking_effort=None, max_tokens=None):
             async for event in super().chat_completion(messages, tools, model, thinking_effort):
                 yield event
             if not any(t["function"]["name"] == "task" for t in tools):

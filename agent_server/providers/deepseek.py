@@ -18,8 +18,8 @@ class DeepSeekProvider(OpenAICompatibleProvider):
     settings_key = "deepseek_api_key"
     console_url = "platform.deepseek.com"
 
-    def _build_kwargs(self, messages, tools, model, thinking_effort=None):
-        kwargs = super()._build_kwargs(messages, tools, model, thinking_effort)
+    def _build_kwargs(self, messages, tools, model, thinking_effort=None, max_tokens=None):
+        kwargs = super()._build_kwargs(messages, tools, model, thinking_effort, max_tokens)
         effort = thinking_effort or DEFAULT_THINKING_EFFORT
         if effort not in REASONING_EFFORTS:
             effort = DEFAULT_THINKING_EFFORT

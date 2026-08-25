@@ -311,6 +311,45 @@ def default_compact_threshold(max_context: int, max_output: int = DEFAULT_MAX_OU
     ceiling = int(max_context * COMPACT_CEILING_RATIO)
     return max(MIN_COMPACT_THRESHOLD, min(ceiling, room))
 
+
+# Slack left between the measured prompt and the window when telling a provider
+# how much it may generate. The prompt figure is an estimate calibrated from
+# real usage, not a tokenizer count, so asking for the last token of the window
+# is asking to be wrong by exactly the amount the estimate is off.
+OUTPUT_SAFETY_MARGIN = 512
+
+# Below this there is no point starting a request: a thinking model needs room
+# to think before it can answer, and a round that dies part-way through a
+# thought produces nothing to keep and bills for all of it.
+MIN_OUTPUT_TOKENS = 2048
+
+
+def request_output_cap(model_id: str, prompt_tokens: int) -> int | None:
+    """How many tokens this one request may generate, or None for "don't say".
+
+    The reason this exists is a run that hit its output limit at what the
+    header called 78% of the window. Nothing was sent for `max_tokens`, so the
+    ceiling was whatever the server happened to default to -- and on a local
+    endpoint the window is shared between prompt and output, so a prompt that
+    grew by a couple of large tool results left no room to think in and the
+    round died mid-sentence.
+
+    None for a model whose window we are guessing at, because a cap invented
+    from a guess is worse than the server's own default.
+    """
+    info = model_info(model_id)
+    window = info.get("context") or 0
+    known = model_id in _ENDPOINT_CONTEXT or model_id in MODELS_BY_ID
+    if not window or not known:
+        return None
+    room = window - prompt_tokens - OUTPUT_SAFETY_MARGIN
+    # A real, published output ceiling is a hard limit and asking for more is a
+    # 400. A guessed one is not a limit at all -- a local server will happily
+    # generate until the window is full -- so it must not become one here.
+    if model_id in MODELS_BY_ID:
+        room = min(room, info.get("max_output") or DEFAULT_MAX_OUTPUT)
+    return max(0, room)
+
 # Slider stops offered in the UI: powers of two from 4K to 1M.
 THRESHOLD_STEPS = [4096 * 2 ** i for i in range(8)] + [1_000_000]
 

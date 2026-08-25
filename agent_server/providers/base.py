@@ -150,6 +150,16 @@ class Provider(ABC):
     name: str = "unknown"
     env_key: str = ""       # environment variable holding the key, if any
     settings_key: str = ""  # `settings` table row holding the key, if any
+    # Whether an assistant message that made a tool call must carry its
+    # `reasoning_content` back on every subsequent request of the same turn.
+    # DeepSeek returns a 400 without it. Nothing else asks for it, and sending
+    # it anyway means re-uploading every thinking block of the turn on every
+    # round -- which on a small local window is most of the window.
+    echoes_reasoning: bool = True
+    # Whether a thinking-effort choice actually reaches the model. False for
+    # endpoints where the parameter is accepted and quietly ignored, so the UI
+    # can say so instead of showing a dial connected to nothing.
+    sends_thinking_effort: bool = True
     # Where the user goes to get a key. The home page used to carry this as an
     # if/elif chain over provider *names*, so adding a provider meant editing a
     # template in two places and a new one silently rendered a link to nowhere.
@@ -176,6 +186,7 @@ class Provider(ABC):
         tools: list[dict],
         model: str,
         thinking_effort: str | None = None,
+        max_tokens: int | None = None,
     ) -> AsyncIterator[StreamEvent]:
         ...
 

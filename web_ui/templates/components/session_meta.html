@@ -11,7 +11,8 @@
                 onclick="openEditorLast()" title="Open editor (Ctrl+E)">&#9998;</button>
         <span class="chip">{{ session.model }}</span>
         <span class="chip">{{ session.prompt_profile }}</span>
-        <span class="chip">thinking: {{ session.thinking_effort or 'high' }}</span>
+        <span class="chip {% if effort_chip.muted %}chip-muted{% endif %}"
+              title="{{ effort_chip.title }}">thinking: {{ effort_chip.label }}</span>
         <span class="chip {% if auto_approve %}chip-warn{% endif %}" data-auto-approve="{{ 1 if auto_approve else 0 }}">
             {% if auto_approve %}Shell: auto-approved{% else %}Shell: ask first{% endif %}
         </span>

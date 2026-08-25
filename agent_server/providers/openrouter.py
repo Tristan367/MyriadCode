@@ -32,8 +32,8 @@ class OpenRouterProvider(OpenAICompatibleProvider):
             self._client_key = key
         return self._client
 
-    def _build_kwargs(self, messages, tools, model, thinking_effort=None):
-        kwargs = super()._build_kwargs(messages, tools, model, thinking_effort)
+    def _build_kwargs(self, messages, tools, model, thinking_effort=None, max_tokens=None):
+        kwargs = super()._build_kwargs(messages, tools, model, thinking_effort, max_tokens)
         # Without this OpenRouter omits its normalised accounting, so
         # cached_tokens comes back zero whatever the upstream actually did and
         # every request looks like a full cache miss.

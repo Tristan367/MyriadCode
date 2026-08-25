@@ -105,7 +105,7 @@ def tool_call_name(tool_call: dict) -> str:
     return tool_call.get("function", {}).get("name", "")
 
 
-def to_api_message(row: dict) -> dict:
+def to_api_message(row: dict, echo_reasoning: bool = True) -> dict:
     """Convert one stored message row into a wire message."""
     role = row["role"]
     msg: dict[str, Any] = {"role": role, "content": row.get("content") or ""}
@@ -121,7 +121,14 @@ def to_api_message(row: dict) -> dict:
             # including when only the most recent keeps it. Once a later user
             # message closes the turn, none of them need it, and compaction
             # marks them so.
-            if row.get("reasoning_content") and (row.get("send_reasoning", 1) != 0):
+            #
+            # That is a DeepSeek rule, and it is expensive: every round of an
+            # open turn re-sends every previous round's thinking, so a model
+            # that thinks in five-thousand-token blocks spends its whole
+            # window re-reading its own notes. Providers that do not demand it
+            # say so with `echoes_reasoning = False` and get the tokens back.
+            if (echo_reasoning and row.get("reasoning_content")
+                    and (row.get("send_reasoning", 1) != 0)):
                 msg["reasoning_content"] = row["reasoning_content"]
         # Assistant messages without tool calls always terminate a turn, and the
         # API neither needs nor uses their reasoning. Dropping it shrinks the
@@ -214,6 +221,7 @@ def build_messages(
     system_prompt: str,
     compactions: list[dict],
     rows: list[dict],
+    echo_reasoning: bool = True,
 ) -> list[dict]:
     """Assemble the full request payload for a turn."""
     messages: list[dict] = [{"role": "system", "content": system_prompt}]
@@ -222,5 +230,5 @@ def build_messages(
             "role": "system",
             "content": f"[Summary of earlier conversation]\n{c['summary_text']}",
         })
-    messages.extend(to_api_message(r) for r in rows)
+    messages.extend(to_api_message(r, echo_reasoning) for r in rows)
     return sanitize(messages)

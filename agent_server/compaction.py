@@ -256,6 +256,12 @@ async def _summariser_messages(
         await session_system_prompt(session),
         await db.get_compactions(session["id"]),
         to_compact,
+        # The one request that absolutely must fit. Carrying every thinking
+        # block of the stretch being summarised into the summariser's own
+        # prompt is how compaction fails on the window it was called to
+        # rescue -- and a summary of what happened does not need the model's
+        # notes on how it decided.
+        echo_reasoning=getattr(provider, "echoes_reasoning", True),
     )
     tools = await session_tool_schemas(session)
     ask = {"role": "user", "content": instructions}

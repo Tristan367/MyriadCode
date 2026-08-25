@@ -103,10 +103,15 @@ class AnthropicProvider(Provider):
         return estimate_tokens(messages)
 
     def _build_kwargs(
-        self, messages: list[dict], tools: list[dict], model: str, thinking_effort: str | None
+        self, messages: list[dict], tools: list[dict], model: str, thinking_effort: str | None,
+        max_tokens: int | None = None,
     ) -> dict:
         system = _extract_system(messages)
-        max_tokens = model_info(model)["max_output"]
+        # Never above the model's published ceiling -- asking for more is a 400
+        # -- but a caller that has measured the remaining window may ask for
+        # less, and a thinking budget is derived from this below.
+        ceiling = model_info(model)["max_output"]
+        max_tokens = min(max_tokens, ceiling) if max_tokens else ceiling
 
         # No "stream": True here. `messages.stream()` below *is* the streaming
         # call -- it is a context manager that opens the stream itself -- and
@@ -153,8 +158,9 @@ class AnthropicProvider(Provider):
         tools: list[dict],
         model: str,
         thinking_effort: str | None = None,
+        max_tokens: int | None = None,
     ) -> AsyncIterator[StreamEvent]:
-        kwargs = self._build_kwargs(messages, tools, model, thinking_effort)
+        kwargs = self._build_kwargs(messages, tools, model, thinking_effort, max_tokens)
         usage = blank_usage()
         finish = "stop"
 

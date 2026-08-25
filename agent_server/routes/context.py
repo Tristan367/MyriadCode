@@ -21,6 +21,7 @@ from agent_server import database as db
 from agent_server.compaction import should_offer_compaction, tail_budget
 from agent_server.config import (
     DEFAULT_MODEL,
+    DEFAULT_THINKING_EFFORT,
     DYNAMIC_DEEPSEEK_MODELS,
     MODELS,
     REASONING_EFFORTS,
@@ -398,6 +399,53 @@ TRANSCRIPT_WINDOW = int(os.getenv("CODEAGENT_TRANSCRIPT_WINDOW") or 60)
 _INPUT_LOOKBEHIND = 12
 
 
+def _effort_chip(session: dict) -> dict:
+    """What the thinking-effort chip should say, and why.
+
+    It used to read `thinking_effort or 'high'` for every session, which was
+    wrong twice over on a custom endpoint: nothing was sent for effort at all
+    (only DeepSeek's adapter ever built the parameter), so the chip named a
+    setting that had never left the building, and the model was meanwhile
+    using its own default -- `xhigh` on Qwen3.8, the most expensive one there
+    is. A dial that is not connected to anything should not be drawn as though
+    it is.
+    """
+    from agent_server.providers import get_provider
+
+    chosen = session.get("thinking_effort")
+    try:
+        provider = get_provider(session.get("provider", ""))
+    except Exception:                                             # noqa: BLE001
+        provider = None
+
+    honoured = getattr(provider, "sends_thinking_effort", True)
+    if not chosen:
+        return {
+            "label": "model default" if not honoured else DEFAULT_THINKING_EFFORT,
+            "muted": not honoured,
+            "title": (
+                "No effort is sent, so the model uses its own default. "
+                "Qwen3.8 defaults to xhigh, the most thorough and slowest setting."
+                if not honoured else
+                f"Not set for this session, so the default of "
+                f"{DEFAULT_THINKING_EFFORT} is sent."
+            ),
+        }
+    if not honoured:
+        return {
+            "label": f"{chosen} (may be ignored)",
+            "muted": True,
+            "title": (
+                "Sent as chat_template_kwargs.reasoning_effort, which llama.cpp "
+                "and Unsloth Studio accept but do not document as a per-request "
+                "field -- measuring it here did not show it taking effect. To be "
+                "sure of it, set it when the model is launched:\n"
+                "  unsloth run ... --chat-template-kwargs '{\"reasoning_effort\":\"medium\"}'"
+            ),
+        }
+    return {"label": chosen, "muted": False, "title": f"Effort {chosen} is sent with every request."}
+
+
 async def _session_context(session: dict) -> dict:
     usage = await db.get_session_usage(session["id"])
     rows = await db.get_recent_messages(session["id"], TRANSCRIPT_WINDOW + _INPUT_LOOKBEHIND)
@@ -423,6 +471,7 @@ async def _session_context(session: dict) -> dict:
         "models": _offerable_models(),
         "profiles": await list_prompt_names(),
         "efforts": REASONING_EFFORTS,
+        "effort_chip": _effort_chip(session),
         "usage": usage,
         "should_compact": await should_offer_compaction(session["id"]),
         # What the tail slider should start on: the session's own choice,

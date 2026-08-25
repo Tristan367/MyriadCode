@@ -31,7 +31,8 @@ class ScriptedProvider:
     def count_tokens(self, messages):
         return 1
 
-    async def chat_completion(self, messages, tools, model, thinking_effort=None):
+    async def chat_completion(self, messages, tools, model,
+                              thinking_effort=None, max_tokens=None):
         self.calls += 1
         if self.calls <= self.rounds:
             yield {
@@ -118,7 +119,8 @@ class FlakyProvider:
     def count_tokens(self, messages):
         return 1
 
-    async def chat_completion(self, messages, tools, model, thinking_effort=None):
+    async def chat_completion(self, messages, tools, model,
+                              thinking_effort=None, max_tokens=None):
         self.calls += 1
         if self.calls <= self.failures:
             yield {
@@ -171,12 +173,24 @@ class AnswerProvider:
         return True
 
     def count_tokens(self, messages):
-        return 1
+        # Proportional to what is actually being sent. It used to return 1 per
+        # message, which made every conversation the same size and so made a
+        # compaction unmeasurable: the loop now decides from the size of the
+        # request it is about to make, and a constant would mean removing
+        # messages changed nothing.
+        return sum(len(str(m.get("content") or "")) for m in messages) // 4 or 1
 
-    async def chat_completion(self, messages, tools, model, thinking_effort=None):
+    async def chat_completion(self, messages, tools, model,
+                              thinking_effort=None, max_tokens=None):
         self.order.append("model")
         yield {"type": "content", "text": "ok"}
         yield {"type": "finish", "reason": "stop"}
+
+
+# Big enough to dominate the fixed cost of the system prompt and the tool
+# schemas, which is a couple of thousand tokens and cannot be summarised away.
+BULK = "x" * 40_000          # ~10,000 tokens by the counter above
+OVER_THRESHOLD = 8_000
 
 
 async def test_a_message_compacts_first_when_the_session_is_over_threshold(session, monkeypatch):
@@ -190,8 +204,8 @@ async def test_a_message_compacts_first_when_the_session_is_over_threshold(sessi
     """
     from agent_server import compaction as compaction_mod
 
-    await db.update_session(session["id"], compact_threshold=100)
-    await db.add_message(session["id"], "assistant", "did some work", token_count=500)
+    await db.update_session(session["id"], compact_threshold=OVER_THRESHOLD)
+    await db.add_message(session["id"], "assistant", BULK)
     await db.add_message(session["id"], "user", "continue")
 
     order = []
@@ -226,8 +240,11 @@ async def test_auto_compaction_fires_again_in_the_same_run(session, monkeypatch)
     """
     from agent_server import compaction as compaction_mod
 
-    await db.update_session(session["id"], compact_threshold=100)
-    await db.add_message(session["id"], "assistant", "did some work", token_count=500)
+    await db.update_session(session["id"], compact_threshold=OVER_THRESHOLD)
+    # Two bulky turns, so one summary can take a real bite out of the
+    # conversation and still leave it over the threshold.
+    await db.add_message(session["id"], "assistant", BULK)
+    await db.add_message(session["id"], "assistant", BULK)
     await db.add_message(session["id"], "user", "continue")
 
     calls = []
@@ -235,8 +252,12 @@ async def test_auto_compaction_fires_again_in_the_same_run(session, monkeypatch)
     async def fake_compact(sid, manual_summary="", extra_instructions="", prompt_override=""):
         calls.append(sid)
         if len(calls) == 1:
-            # "Succeeds" but does not actually compact, so the context is still
-            # over threshold. The loop must ask to compact again.
+            # Summarises the oldest turn only. Genuinely smaller, genuinely
+            # still over the threshold -- which is the case that has to fire
+            # again rather than proceed.
+            rows = await db.get_messages(sid)
+            bulky = [r for r in rows if len(r["content"] or "") > 1000]
+            await db.mark_messages_compacted(sid, [bulky[0]["id"]])
             return {"ok": True, "compacted": 1, "kept": 1, "summary": "summarised"}
         return {"ok": False, "reason": "stop after the second attempt"}
 
@@ -258,3 +279,47 @@ async def test_auto_compaction_fires_again_in_the_same_run(session, monkeypatch)
     assert not any(e["type"] == "error" for e in events), (
         "a failed compaction should no longer end the turn"
     )
+
+
+async def test_a_compaction_that_frees_nothing_is_not_tried_a_second_time(
+    session, monkeypatch
+):
+    """The infinite loop that measuring the real request opened up.
+
+    The size of a request has a floor that no amount of summarising can get
+    under: the system prompt and the tool schemas are sent every time and are
+    not conversation. A threshold set below that floor is unreachable by
+    definition -- so a loop that compacts whenever it is over threshold, and
+    re-checks after compacting, will summarise the same session forever,
+    destroying more of the transcript on every pass and never sending
+    anything.
+
+    It has to be judged on the request rather than on what the summariser
+    reports, because a summariser that did its job perfectly still reports
+    success here.
+    """
+    from agent_server import compaction as compaction_mod
+
+    # Below the fixed cost of the tool schemas, so nothing can ever satisfy it.
+    await db.update_session(session["id"], compact_threshold=100)
+    await db.add_message(session["id"], "user", "continue")
+
+    calls = []
+
+    async def fake_compact(sid, manual_summary="", extra_instructions="", prompt_override=""):
+        calls.append(sid)
+        return {"ok": True, "compacted": 1, "kept": 1, "summary": "summarised"}
+
+    monkeypatch.setattr(compaction_mod, "compact_session", fake_compact)
+    provider = AnswerProvider([])
+    monkeypatch.setattr(agent, "get_provider", lambda _p: provider)
+
+    events = [e async for e in agent.run(session["id"])]
+
+    assert len(calls) <= 1, f"compacted {len(calls)} times over an unreachable threshold"
+    warnings = [e for e in events if e["type"] == "notice" and e.get("level") == "warn"]
+    assert warnings, "the session was left summarising itself with nothing said about it"
+    assert "raise it" in warnings[-1]["message"].lower(), warnings[-1]["message"]
+    # And the turn still happens. Refusing to answer because a threshold is set
+    # too low would be the loop's problem becoming the user's.
+    assert events[-1]["type"] == "done"

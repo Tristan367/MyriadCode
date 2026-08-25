@@ -23,7 +23,13 @@ from datetime import UTC, datetime
 
 from agent_server import cache_guard, permissions
 from agent_server import database as db
-from agent_server.config import CACHE_WARN_TOKENS, MAX_TOOL_RESULT_CHARS
+from agent_server.config import (
+    CACHE_WARN_TOKENS,
+    MAX_TOOL_RESULT_CHARS,
+    MIN_OUTPUT_TOKENS,
+    model_info,
+    request_output_cap,
+)
 from agent_server.conversation import (
     build_messages,
     normalize_tool_calls,
@@ -32,7 +38,12 @@ from agent_server.conversation import (
     tool_call_name,
 )
 from agent_server.providers import Provider, get_provider
-from agent_server.providers.base import completion_with_retry, message_chars, observe_usage
+from agent_server.providers.base import (
+    chars_per_token,
+    completion_with_retry,
+    message_chars,
+    observe_usage,
+)
 from agent_server.system_prompt import session_system_prompt, session_tool_schemas
 from agent_server.tools.base import ToolContext, ToolResult, clear_spills, truncate
 from agent_server.tools.registry import execute_tool, get_tool
@@ -577,6 +588,22 @@ async def _loop(
     # that changes underneath. See session_system_prompt for why that matters.
     system_prompt = await session_system_prompt(session)
 
+    # A custom endpoint reports the context window it was actually launched
+    # with, and that is only learned by asking it. Ask now, because everything
+    # below sizes itself against that number -- otherwise the first round after
+    # every restart plans against the 131K default for what is, on the machine
+    # this was written for, a 43K window, and plans to overrun it.
+    if hasattr(provider, "resolve_model"):
+        try:
+            await provider.resolve_model()
+        except Exception:                                         # noqa: BLE001
+            log.debug("could not ask %s for its context window", provider.name, exc_info=True)
+
+    # The measured prompt at the last compaction of this run, so a compaction
+    # that did not make the request smaller is not tried a second time. See
+    # where it is read, below.
+    compacted_at: int | None = None
+
     # No round cap. A turn ends when the model stops asking for tools, hits its
     # output limit, pauses for the user, or the user stops it -- all of which
     # are checked below. A counter here only ever cut off work that was going
@@ -600,6 +627,28 @@ async def _loop(
                 "from_name": row.get("mail_from"),
             }
 
+        # Measure the request that is about to go out, before deciding anything
+        # about it.
+        #
+        # This used to be decided from `get_session_usage`, which reads the
+        # prompt size of the *last completed* request out of the database. That
+        # figure is always one round behind, and a round that appended two
+        # large tool results is measured as though it had not -- so the check
+        # passed on a conversation that no longer fitted. It is how a run
+        # reported 78% of its window in the header and then died on its output
+        # limit in the same breath: the prompt had grown past anything the
+        # header knew about, and there was no room left to think in.
+        rows = await db.get_messages(session_id)
+        messages = build_messages(
+            system_prompt,
+            await db.get_compactions(session_id),
+            rows,
+            echo_reasoning=getattr(provider, "echoes_reasoning", True),
+        )
+        fp_tokens = cache_guard.slot_tokens(provider, tools, messages)
+        prompt_tokens = sum(fp_tokens)
+        window = model_info(session["model"])["context"]
+
         # Compact at a clean turn boundary, before spending another full-context
         # request. Automatic, with no opt-out: a long-horizon task must not be
         # interrupted mid-flight to ask. Raise the threshold to compact by hand
@@ -610,10 +659,52 @@ async def _loop(
         # threshold change, and is cleared when the run ends.
         if session_id not in _compaction_snoozed:
             usage = await db.get_session_usage(session_id)
-            if usage["threshold"] and usage["context"] >= usage["threshold"]:
+            over_threshold = bool(usage["threshold"]) and prompt_tokens >= usage["threshold"]
+            # Room to think in, not merely room to sit in. On any provider that
+            # shares one window between prompt and output -- which is every
+            # local server -- a prompt can fit with a few hundred tokens spare
+            # and still leave the model nowhere to put an answer. That is not a
+            # context overflow and never trips the threshold; it surfaces as a
+            # round that stops mid-thought, which is the more confusing failure
+            # because the header still reads well under 100%.
+            starved = bool(window) and window - prompt_tokens < MIN_OUTPUT_TOKENS
+            # A compaction that did not actually shrink the request will not
+            # shrink it next time either, and this check runs at every turn
+            # boundary. Measured on the request itself rather than taken from
+            # what the summariser reports, because the thing that cannot be
+            # summarised away is the part that is not conversation at all: the
+            # system prompt and the tool schemas are a fixed floor, and a
+            # threshold set below that floor is unreachable by definition.
+            # Without this, such a session summarises itself forever, losing
+            # more of the transcript on every pass and never sending anything.
+            if (over_threshold or starved) and compacted_at is not None \
+                    and prompt_tokens >= compacted_at:
+                snooze_compaction(session_id)
+                log.warning(
+                    "compaction did not shrink session=%s (%d tokens before and after);"
+                    " not trying again this run", session_id, prompt_tokens,
+                )
+                yield {
+                    "type": "notice",
+                    "level": "warn",
+                    "message": (
+                        f"Compaction did not make this conversation any smaller: it is "
+                        f"still {prompt_tokens:,} tokens, against a threshold of "
+                        f"{usage['threshold']:,}. The system prompt and the tool "
+                        f"definitions cannot be summarised away, so a threshold below "
+                        f"their size can never be met. Raise it in the session menu."
+                    ),
+                }
+            elif over_threshold or starved:
                 from agent_server.compaction import compact_session
 
-                before_tokens = usage["context"]
+                before_tokens = prompt_tokens
+                compacted_at = prompt_tokens
+                if starved and not over_threshold:
+                    log.info(
+                        "compacting session=%s for output room: prompt=%d of window=%d",
+                        session_id, prompt_tokens, window,
+                    )
                 yield {"type": "compacting"}
                 result = await compact_session(session_id)
                 yield {"type": "compacted", **result}
@@ -681,9 +772,6 @@ async def _loop(
                 tools = await session_tool_schemas(session)
                 continue
 
-        rows = await db.get_messages(session_id)
-        messages = build_messages(system_prompt, await db.get_compactions(session_id), rows)
-
         if not any(m["role"] != "system" for m in messages):
             yield {"type": "error", "message": "Nothing to send: the conversation is empty."}
             return
@@ -693,7 +781,6 @@ async def _loop(
         # large accidental invalidation gets a confirmation rather than turning
         # up on the bill.
         fp = cache_guard.fingerprint(tools, messages)
-        fp_tokens = cache_guard.slot_tokens(provider, tools, messages)
         forecast = cache_guard.predict(
             json.loads(session.get("cache_fp") or "[]"),
             json.loads(session.get("cache_fp_tokens") or "[]"),
@@ -735,7 +822,23 @@ async def _loop(
         # The gap between a tool result and the model's first token is the one
         # place nothing is visibly happening. Tell the client we are waiting on
         # the provider so it can show an indicator instead of looking hung.
-        yield {"type": "working"}
+        #
+        # It also carries the measured prompt. Until this existed the context
+        # ring could only be redrawn from the database, which learns nothing
+        # until a round *finishes* -- so a model that thought for five minutes
+        # left the ring frozen for five minutes, and on the first round of a
+        # session it sat at 0% because there was no completed round to read.
+        # `chars_per_token` goes with it so the client's running total of the
+        # tokens streaming back uses the same calibrated ratio the server uses
+        # for its own estimates, rather than a second guess of its own.
+        output_cap = request_output_cap(session["model"], prompt_tokens)
+        yield {
+            "type": "working",
+            "prompt_tokens": prompt_tokens,
+            "max_output": output_cap,
+            "window": window,
+            "chars_per_token": chars_per_token(session["model"]),
+        }
 
         async for event in completion_with_retry(
             provider,
@@ -744,6 +847,7 @@ async def _loop(
             tools=tools,
             model=session["model"],
             thinking_effort=session.get("thinking_effort"),
+            max_tokens=output_cap,
         ):
             if abort.is_set():
                 break
@@ -861,7 +965,33 @@ async def _loop(
                 }
 
         if finish == "length":
-            yield {"type": "error", "message": "Model hit its output limit. Ask it to continue."}
+            # Say which limit, because the answer differs. A model that filled
+            # its own output ceiling can be told to carry on. A model that ran
+            # out of *window* cannot -- carrying on sends the same over-long
+            # prompt back and stops in the same place -- and the only thing
+            # that helps is making the conversation smaller.
+            spent = (usage or {}).get("completion_tokens") or 0
+            if window and prompt_tokens + spent >= window - MIN_OUTPUT_TOKENS:
+                yield {
+                    "type": "error",
+                    "message": (
+                        f"The model ran out of room mid-answer: the conversation is "
+                        f"{prompt_tokens:,} tokens of a {window:,}-token window, which "
+                        f"left {max(0, window - prompt_tokens):,} to think and answer in. "
+                        f"Compact it from the session menu, or give this model a larger "
+                        f"context window on the server serving it."
+                    ),
+                }
+            else:
+                yield {
+                    "type": "error",
+                    "message": (
+                        f"Model hit its output limit of {output_cap:,} tokens after "
+                        f"{spent:,}. Ask it to continue."
+                        if output_cap else
+                        "Model hit its output limit. Ask it to continue."
+                    ),
+                }
             return
 
         if not calls:

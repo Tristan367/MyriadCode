@@ -14,6 +14,19 @@ log = logging.getLogger(__name__)
 class CustomOpenAIProvider(OpenAICompatibleProvider):
     """A named custom endpoint. name='my-vllm', base_url='http://box:8000/v1'."""
 
+    # A local server does not demand its own thinking back, and its window is
+    # small enough that re-sending it is the difference between finishing a
+    # task and compacting three times. Qwen3.8's template calls the same idea
+    # `preserve_thinking` and Unsloth documents it as costing tokens for a
+    # possible accuracy gain -- on a 43K window that trade is not close.
+    echoes_reasoning = False
+
+    # The effort is sent, but whether anything reads it depends on the server
+    # and on the model's chat template, and probing this one at temperature 0
+    # gave results that did not order. Claiming otherwise in the header would
+    # be inventing a guarantee.
+    sends_thinking_effort = False
+
     def __init__(self, name: str = "", base_url: str = "", api_key: str = ""):
         super().__init__()
         self._name = name
@@ -118,12 +131,55 @@ class CustomOpenAIProvider(OpenAICompatibleProvider):
             remember_endpoint_context(f"custom:{self._name}", context)
         return self._resolved
 
-    async def chat_completion(self, messages, tools, model, thinking_effort=None):
+    # MyriadCode's effort scale mapped onto the one Qwen3.8's chat template
+    # understands: low, medium, xhigh, and thinking off altogether.
+    # https://unsloth.ai/docs/models/qwen3.8
+    _EFFORT_MAP = {
+        "none": None, "minimal": "low", "low": "low", "medium": "medium",
+        "high": "xhigh", "xhigh": "xhigh", "max": "xhigh",
+    }
+
+    def _build_kwargs(self, messages, tools, model, thinking_effort=None, max_tokens=None):
+        kwargs = super()._build_kwargs(messages, tools, model, thinking_effort, max_tokens)
+        if not thinking_effort:
+            return kwargs
+
+        # `chat_template_kwargs` is how llama.cpp and Unsloth Studio hand
+        # arguments to a model's Jinja chat template. Measured against the
+        # endpoint this was written for: `enable_thinking: false` demonstrably
+        # works (the model answers with an empty reasoning block), and unknown
+        # keys are ignored rather than rejected, so sending these is safe on a
+        # server that does not implement them.
+        #
+        # `reasoning_effort` is a different matter. Unsloth documents it as a
+        # *launch* flag -- `unsloth run --chat-template-kwargs
+        # '{"reasoning_effort":"medium"}'` -- and per-request support is not
+        # documented. Probing it at temperature 0 gave results that did not
+        # order (low produced more thinking than xhigh), which is what being
+        # quietly ignored looks like. It is sent anyway because it costs
+        # nothing and works on servers that do honour it -- but the effort
+        # chip in the UI says so rather than claiming a setting that may be
+        # going nowhere.
+        template_kwargs: dict = {}
+        effort = self._EFFORT_MAP.get(thinking_effort, thinking_effort)
+        if effort is None:
+            template_kwargs["enable_thinking"] = False
+        else:
+            template_kwargs["reasoning_effort"] = effort
+        kwargs["extra_body"] = {
+            **kwargs.get("extra_body", {}),
+            "chat_template_kwargs": template_kwargs,
+        }
+        return kwargs
+
+    async def chat_completion(self, messages, tools, model, thinking_effort=None,
+                              max_tokens=None):
         # The session stores the endpoint key as its model; the real id is
         # whatever the endpoint says it is right now.
         if not model or model.startswith("custom:"):
             model = await self.resolve_model() or model
         async for event in super().chat_completion(
-            messages=messages, tools=tools, model=model, thinking_effort=thinking_effort
+            messages=messages, tools=tools, model=model,
+            thinking_effort=thinking_effort, max_tokens=max_tokens,
         ):
             yield event

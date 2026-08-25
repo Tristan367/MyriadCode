@@ -42,7 +42,8 @@ class OpenAICompatibleProvider(Provider):
 
     # ── streaming ──────────────────────────────────────────────────────────
     def _build_kwargs(self, messages: list[dict], tools: list[dict], model: str,
-                      thinking_effort: str | None = None) -> dict:
+                      thinking_effort: str | None = None,
+                      max_tokens: int | None = None) -> dict:
         """Build the kwargs for the chat completion call. Override to add
         provider-specific params (e.g. thinking mode for DeepSeek)."""
         kwargs: dict = {
@@ -51,6 +52,8 @@ class OpenAICompatibleProvider(Provider):
             "stream": True,
             "stream_options": {"include_usage": True},
         }
+        if max_tokens:
+            kwargs["max_tokens"] = max_tokens
         if tools:
             kwargs["tools"] = tools
             kwargs["tool_choice"] = "auto"
@@ -62,8 +65,9 @@ class OpenAICompatibleProvider(Provider):
         tools: list[dict],
         model: str,
         thinking_effort: str | None = None,
+        max_tokens: int | None = None,
     ) -> AsyncIterator[StreamEvent]:
-        kwargs = self._build_kwargs(messages, tools, model, thinking_effort)
+        kwargs = self._build_kwargs(messages, tools, model, thinking_effort, max_tokens)
 
         try:
             stream = await self._get_client().chat.completions.create(**kwargs)
