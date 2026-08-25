@@ -269,8 +269,10 @@ async def _summariser_messages(
         return [
             {"role": "system", "content": instructions},
             {"role": "user", "content": render_transcript(to_compact)},
-        ], []
-    return live + [ask], tools
+        ], [], False
+    # True: the summariser was shown the earlier summaries as well as the turns
+    # being compacted, so what it writes covers both and the old ones can go.
+    return live + [ask], tools, True
 
 
 def _context_limit(session: dict) -> int:
@@ -354,11 +356,12 @@ async def compact_session(
     manual_summary: str = "",
     extra_instructions: str = "",
     prompt_override: str = "",
+    abort=None,
 ) -> dict:
     """Summarise the older part of a conversation. See compact_session_events."""
     result = {}
     async for event in compact_session_events(
-        session_id, manual_summary, extra_instructions, prompt_override
+        session_id, manual_summary, extra_instructions, prompt_override, abort
     ):
         if event["type"] == "compact_done":
             result = event["result"]
@@ -370,6 +373,7 @@ async def compact_session_events(
     manual_summary: str = "",
     extra_instructions: str = "",
     prompt_override: str = "",
+    abort=None,
 ):
     """Summarise the older part of a conversation, streaming the summary.
 
@@ -425,6 +429,7 @@ async def compact_session_events(
 
     provider = get_provider(session["provider"])
 
+    folded = False
     if manual_summary.strip():
         summary = manual_summary.strip()
     else:
@@ -435,7 +440,8 @@ async def compact_session_events(
         if extra_instructions.strip():
             instructions += f"\n\nAdditional instructions for this summary:\n{extra_instructions.strip()}"
 
-        messages, tools = await _summariser_messages(session, to_compact, instructions)
+        messages, tools, folded = await _summariser_messages(
+            session, to_compact, instructions)
 
         # An empty response is not a transport error, so `completion_with_retry`
         # does not see it and nothing retried. It happens: a smaller model
@@ -449,6 +455,7 @@ async def compact_session_events(
             failed = None
             async for event in completion_with_retry(
                 provider,
+                abort=abort,
                 messages=messages,
                 tools=tools,
                 model=session["model"],
@@ -468,6 +475,9 @@ async def compact_session_events(
             if failed:
                 yield fail(failed)
                 return
+            if abort is not None and abort.is_set():
+                yield fail("Stopped.")
+                return
             summary = summary.strip()
             if summary:
                 break
@@ -484,14 +494,41 @@ async def compact_session_events(
     original_tokens = sum(message_tokens(r, session["model"]) for r in to_compact)
     compressed_tokens = provider.count_tokens([{"role": "system", "content": summary}])
 
+    # Fold in the summaries this one supersedes.
+    #
+    # Every compaction used to *add* a summary and remove none -- and the
+    # summariser is shown the earlier ones, so what it writes already covers
+    # them and keeping both stores the same history twice.
+    #
+    # On a large window that is waste. On a small one it is a ratchet.
+    # Measured on a 43,008-token window: three compactions inside one turn left
+    # 5,455 tokens of summaries that could never shrink, on top of 4,378 of
+    # system prompt and tool schemas and a tail budget of 40% of the threshold.
+    # The floor rose with every pass, so compaction could not get the
+    # conversation under the threshold, so it fired again -- three summaries,
+    # each one covering the one before it, and the context still at 78%.
+    #
+    # Only when the summariser actually saw them: the flattened fallback for an
+    # over-long head does not include them, and folding there would throw away
+    # history that nothing had read.
+    superseded = await db.get_compactions(session_id) if folded else []
+    replaced_tokens = original_tokens + sum(
+        c["compressed_token_count"] or 0 for c in superseded)
     await db.add_compaction(
         session_id=session_id,
         summary_text=summary,
-        range_start=to_compact[0]["id"],
+        # Spanning everything the summary now stands for, so the card can say
+        # which part of the conversation it replaced.
+        range_start=min(
+            [to_compact[0]["id"]]
+            + [c["message_range_start"] for c in superseded if c["message_range_start"]]
+        ),
         range_end=to_compact[-1]["id"],
-        original_tokens=original_tokens,
+        original_tokens=replaced_tokens,
         compressed_tokens=compressed_tokens,
     )
+    for old in superseded:
+        await db.delete_compaction(old["id"])
     await db.mark_messages_compacted(session_id, [r["id"] for r in to_compact])
 
     # The retained tail is the whole cost of a compacted session, so trim what

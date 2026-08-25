@@ -61,6 +61,28 @@ def clocktime(value: str) -> str:
     return dt.strftime("%-I:%M %p").lower().replace("am", "AM").replace("pm", "PM")
 
 
+def stamp(value: str) -> str:
+    """Date and time, in the reader's own timezone.
+
+    `clocktime` alone is fine on a message, which sits in an ordered transcript
+    where the day is obvious from its neighbours. A summary card is not in that
+    position: they collect at the top, and a stack of them showing only "3:12
+    AM", "3:21 AM", "3:25 AM" says nothing about which day, or -- on a session
+    left open overnight -- which of them is even the recent one.
+    """
+    dt = _parse(value)
+    if dt is None:
+        return value
+    now = datetime.now().astimezone()
+    same_day = dt.date() == now.date()
+    time_part = dt.strftime("%-I:%M %p").lower().replace("am", "AM").replace("pm", "PM")
+    if same_day:
+        return f"today {time_part}"
+    if (now.date() - dt.date()).days == 1:
+        return f"yesterday {time_part}"
+    return f"{dt.strftime('%b %-d')} {time_part}"
+
+
 def tildepath(value: str) -> str:
     """Render /home/you/projects/x as ~/projects/x."""
     if not value:
@@ -195,6 +217,7 @@ def filesize(n: int | None) -> str:
 
 templates.env.filters["filesize"] = filesize
 templates.env.filters["clocktime"] = clocktime
+templates.env.filters["stamp"] = stamp
 templates.env.filters["tildepath"] = tildepath
 templates.env.filters["attachments"] = extract_attachments
 templates.env.filters["withoutattachments"] = strip_attachments

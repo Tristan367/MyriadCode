@@ -7,13 +7,18 @@
                 <summary class="tool-summary">
                     Earlier conversation compacted
                     {%- if c.original_token_count %}
-                    ({{ '{:,}'.format(c.original_token_count) }} &rarr; {{ '{:,}'.format(c.compressed_token_count) }} tokens)
+                    {#- The saving on the part that was replaced, which is not
+                        the same as what the whole conversation now costs: the
+                        recent turns are kept verbatim on purpose. Reading
+                        "10,720 -> 1,808" as the size of the conversation is
+                        what made a compaction that worked look broken. #}
+                    (replaced {{ '{:,}'.format(c.original_token_count) }} tokens with {{ '{:,}'.format(c.compressed_token_count) }})
                     {%- endif %}
                 </summary>
                 <div class="content-text" data-markdown>{{ c.summary_text }}</div>
             </details>
         </div>
-        <span class="msg-time">{{ c.created_at | clocktime }}</span>
+        <span class="msg-time" title="{{ c.created_at }}">{{ c.created_at | stamp }}</span>
     </div>
     {% endfor %}
     {% if compactions %}

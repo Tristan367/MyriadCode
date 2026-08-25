@@ -721,7 +721,7 @@ async def _loop(
                         session_id, prompt_tokens, window,
                     )
                 yield {"type": "compacting"}
-                result = await compact_session(session_id)
+                result = await compact_session(session_id, abort=abort)
                 yield {"type": "compacted", **result}
                 if not result.get("ok"):
                     # A failed compaction must not take the turn with it. It
@@ -1023,7 +1023,7 @@ async def _loop(
                     from agent_server.compaction import compact_session
 
                     yield {"type": "compacting"}
-                    outcome = await compact_session(session_id)
+                    outcome = await compact_session(session_id, abort=abort)
                     yield {"type": "compacted", **outcome}
                     if outcome.get("ok"):
                         session = await db.get_session(session_id) or session

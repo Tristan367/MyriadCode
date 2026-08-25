@@ -822,6 +822,11 @@ async def add_compaction(
     )
 
 
+async def delete_compaction(compaction_id: int) -> None:
+    """Remove a summary that a later one has folded in."""
+    await _execute("DELETE FROM compactions WHERE id = ?", (compaction_id,))
+
+
 async def get_compactions(session_id: str) -> list[dict]:
     return await _fetchall(
         "SELECT * FROM compactions WHERE session_id = ? ORDER BY id ASC", (session_id,)

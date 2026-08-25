@@ -210,7 +210,8 @@ async def test_a_message_compacts_first_when_the_session_is_over_threshold(sessi
 
     order = []
 
-    async def fake_compact(sid, manual_summary="", extra_instructions="", prompt_override=""):
+    async def fake_compact(sid, manual_summary="", extra_instructions="",
+                           prompt_override="", abort=None):
         order.append("compact")
         # Actually compact (mark the older turns) so the live context drops below
         # threshold and the loop proceeds to the model call instead of asking to
@@ -249,7 +250,8 @@ async def test_auto_compaction_fires_again_in_the_same_run(session, monkeypatch)
 
     calls = []
 
-    async def fake_compact(sid, manual_summary="", extra_instructions="", prompt_override=""):
+    async def fake_compact(sid, manual_summary="", extra_instructions="",
+                           prompt_override="", abort=None):
         calls.append(sid)
         if len(calls) == 1:
             # Summarises the oldest turn only. Genuinely smaller, genuinely
@@ -306,7 +308,8 @@ async def test_a_compaction_that_frees_nothing_is_not_tried_a_second_time(
 
     calls = []
 
-    async def fake_compact(sid, manual_summary="", extra_instructions="", prompt_override=""):
+    async def fake_compact(sid, manual_summary="", extra_instructions="",
+                           prompt_override="", abort=None):
         calls.append(sid)
         return {"ok": True, "compacted": 1, "kept": 1, "summary": "summarised"}
 

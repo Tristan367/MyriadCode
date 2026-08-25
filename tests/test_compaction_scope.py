@@ -47,7 +47,7 @@ async def test_the_retained_tail_is_never_shown_to_the_summariser(session):
     to_compact, kept = split_for_compaction(rows)
     assert to_compact and kept, "this conversation should be long enough to compact"
 
-    messages, _tools = await _summariser_messages(session, to_compact, "Summarise this conversation.")
+    messages, _tools, _folded = await _summariser_messages(session, to_compact, "Summarise this conversation.")
     sent = "\n".join(m.get("content") or "" for m in messages)
     for row in kept:
         assert row["content"] not in sent, f"retained message leaked: {row['content']}"
@@ -60,7 +60,7 @@ async def test_nothing_instructs_the_model_about_a_boundary(session):
     rows = await _long_conversation(session["id"])
     to_compact, _ = split_for_compaction(rows)
 
-    messages, _tools = await _summariser_messages(session, to_compact, "Summarise this conversation.")
+    messages, _tools, _folded = await _summariser_messages(session, to_compact, "Summarise this conversation.")
     assert messages[-1]["content"] == "Summarise this conversation."
 
 
@@ -74,7 +74,7 @@ async def test_the_request_is_a_prefix_of_the_live_conversation(session):
     live = build_messages(
         await session_system_prompt(session), await db.get_compactions(session["id"]), rows,
     )
-    messages, _tools = await _summariser_messages(session, to_compact, "Summarise this conversation.")
+    messages, _tools, _folded = await _summariser_messages(session, to_compact, "Summarise this conversation.")
 
     body = messages[:-1]
     assert body == live[: len(body)], "the summariser request must be a live prefix"
@@ -105,7 +105,7 @@ async def test_the_head_ends_on_a_complete_tool_round(session):
 
     rows = await db.get_messages(session["id"])
     to_compact, _ = split_for_compaction(rows)
-    messages, _tools = await _summariser_messages(session, to_compact, "Summarise this conversation.")
+    messages, _tools, _folded = await _summariser_messages(session, to_compact, "Summarise this conversation.")
 
     assert messages[-1]["role"] == "user"
     assert messages[-2]["role"] != "assistant" or not messages[-2].get("tool_calls")
@@ -116,7 +116,7 @@ async def test_a_head_too_large_to_send_falls_back_to_a_flat_transcript(session,
     to_compact, _ = split_for_compaction(rows)
     monkeypatch.setattr("agent_server.compaction._context_limit", lambda _s: 1)
 
-    messages, _tools = await _summariser_messages(session, to_compact, "Summarise this conversation.")
+    messages, _tools, _folded = await _summariser_messages(session, to_compact, "Summarise this conversation.")
     assert [m["role"] for m in messages] == ["system", "user"]
 
 
@@ -131,7 +131,7 @@ async def test_the_summariser_carries_the_same_tools_as_a_normal_turn(session):
     rows = await _long_conversation(session["id"])
     to_compact, _ = split_for_compaction(rows)
 
-    _messages, tools = await _summariser_messages(
+    _messages, tools, _folded = await _summariser_messages(
         session, to_compact, "Summarise this conversation."
     )
     assert tools == await session_tool_schemas(await db.get_session(session["id"]))
@@ -145,7 +145,7 @@ async def test_a_flattened_fallback_sends_no_tools(session, monkeypatch):
     to_compact, _ = split_for_compaction(rows)
     monkeypatch.setattr("agent_server.compaction._context_limit", lambda _s: 1)
 
-    messages, tools = await _summariser_messages(
+    messages, tools, _folded = await _summariser_messages(
         session, to_compact, "Summarise this conversation."
     )
     assert [m["role"] for m in messages] == ["system", "user"]
