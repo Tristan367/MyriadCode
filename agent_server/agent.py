@@ -42,8 +42,10 @@ from agent_server.providers import Provider, get_provider
 from agent_server.providers.base import (
     chars_per_token,
     completion_with_retry,
+    image_tokens,
     message_chars,
     observe_usage,
+    ratios_snapshot,
 )
 from agent_server.system_prompt import session_system_prompt, session_tool_schemas
 from agent_server.tools.base import ToolContext, ToolResult, clear_spills, truncate
@@ -609,6 +611,11 @@ async def _loop(
     # where it is read, below.
     compacted_at: int | None = None
 
+    # Whether this turn has already tried summarising its way out of a window
+    # overflow. Once: a conversation that still does not fit after a summary
+    # will not fit after the next one either.
+    window_recovery_tried = False
+
     # No round cap. A turn ends when the model stops asking for tools, hits its
     # output limit, pauses for the user, or the user stops it -- all of which
     # are checked below. A counter here only ever cut off work that was going
@@ -651,10 +658,10 @@ async def _loop(
             echo_reasoning=getattr(provider, "echoes_reasoning", True),
             vision=supports_vision(session["model"]),
         )
-        fp_tokens = cache_guard.slot_tokens(provider, tools, messages)
+        fp_tokens = cache_guard.slot_tokens(provider, tools, messages, session["model"])
         # Same arithmetic the header uses, from one definition -- see
         # measure.py for what happened when there were two.
-        prompt_tokens = measure.prompt_tokens(provider, tools, messages)
+        prompt_tokens = measure.prompt_tokens(provider, tools, messages, session["model"])
         window = model_info(session["model"])["context"]
 
         # Compact at a clean turn boundary, before spending another full-context
@@ -905,7 +912,9 @@ async def _loop(
                     await db.add_message(
                         session_id, "assistant", content,
                         reasoning_content=reasoning or None,
-                        token_count=provider.count_tokens([{"role": "assistant", "content": content}]),
+                        token_count=provider.count_tokens(
+                            [{"role": "assistant", "content": content}],
+                            session["model"]),
                     )
                 yield {"type": "error", "message": event["message"]}
                 break
@@ -918,7 +927,9 @@ async def _loop(
                 await db.add_message(
                     session_id, "assistant", content,
                     reasoning_content=reasoning or None,
-                    token_count=provider.count_tokens([{"role": "assistant", "content": content}]),
+                    token_count=provider.count_tokens(
+                            [{"role": "assistant", "content": content}],
+                            session["model"]),
                 )
             yield {"type": "aborted"}
             return
@@ -953,7 +964,11 @@ async def _loop(
                     session["model"],
                     message_chars(messages),
                     usage["prompt_tokens"],
+                    image_tokens(messages),
                 )
+                # Persisted, so the next server start does not begin by
+                # guessing again. One small settings row per round.
+                await db.set_setting("token_ratios", json.dumps(ratios_snapshot()))
             yield {"type": "usage", "usage": usage}
             # The cache can also expire server-side, which nothing local can
             # foresee. Say so once it has happened, so the next expensive turn
@@ -979,15 +994,51 @@ async def _loop(
             # prompt back and stops in the same place -- and the only thing
             # that helps is making the conversation smaller.
             spent = (usage or {}).get("completion_tokens") or 0
-            if window and prompt_tokens + spent >= window - MIN_OUTPUT_TOKENS:
+            real_prompt = (usage or {}).get("prompt_tokens") or prompt_tokens
+            if window and real_prompt + spent >= window - MIN_OUTPUT_TOKENS:
+                # The window ran out, not the output ceiling. Telling the user
+                # to ask it to continue is advice that cannot work: the same
+                # over-long prompt goes back and stops in the same place, only
+                # now with the failed round's output in front of it as well.
+                #
+                # The conversation has to get smaller, and that is something
+                # this loop can do. Once per turn, so a session that cannot be
+                # made to fit says so instead of summarising itself forever.
+                if not window_recovery_tried and session_id not in _compaction_snoozed:
+                    window_recovery_tried = True
+                    log.info(
+                        "session=%s overflowed the window (%d prompt + %d output of %d);"
+                        " compacting and retrying", session_id, real_prompt, spent, window,
+                    )
+                    yield {
+                        "type": "notice",
+                        "level": "warn",
+                        "message": (
+                            f"That round ran out of room: {real_prompt:,} tokens of "
+                            f"conversation left only {max(0, window - real_prompt):,} of a "
+                            f"{window:,}-token window to answer in. Summarising and "
+                            f"trying again."
+                        ),
+                    }
+                    from agent_server.compaction import compact_session
+
+                    yield {"type": "compacting"}
+                    outcome = await compact_session(session_id)
+                    yield {"type": "compacted", **outcome}
+                    if outcome.get("ok"):
+                        session = await db.get_session(session_id) or session
+                        system_prompt = await session_system_prompt(session)
+                        tools = await session_tool_schemas(session)
+                        continue
                 yield {
                     "type": "error",
                     "message": (
                         f"The model ran out of room mid-answer: the conversation is "
-                        f"{prompt_tokens:,} tokens of a {window:,}-token window, which "
-                        f"left {max(0, window - prompt_tokens):,} to think and answer in. "
-                        f"Compact it from the session menu, or give this model a larger "
-                        f"context window on the server serving it."
+                        f"{real_prompt:,} tokens of a {window:,}-token window, which "
+                        f"left {max(0, window - real_prompt):,} to think and answer in. "
+                        f"Compacting did not make it small enough. Raise the model's "
+                        f"context window on the server serving it, or start a fresh "
+                        f"session for the next piece of work."
                     ),
                 }
             else:

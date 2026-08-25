@@ -122,7 +122,15 @@ def predict(
     }
 
 
-def slot_tokens(provider, tools: list[dict], messages: list[dict]) -> list[int]:
-    """Token cost per fingerprint slot, aligned with `fingerprint`."""
+def slot_tokens(provider, tools: list[dict], messages: list[dict],
+                model: str = "") -> list[int]:
+    """Token cost per fingerprint slot, aligned with `fingerprint`.
+
+    `model` is what selects the learned characters-per-token ratio. Leaving it
+    out meant every estimate used the hardcoded default, so the calibration
+    `observe_usage` has been performing on every round since it was written was
+    recorded and never read -- and on a model that packs three characters into
+    a token rather than four, that is a prompt estimate a third short.
+    """
     head = len(json.dumps(tools, ensure_ascii=False)) // 4 if tools else 0
-    return [head] + [provider.count_tokens([m]) for m in messages]
+    return [head] + [provider.count_tokens([m], model) for m in messages]

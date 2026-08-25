@@ -176,7 +176,7 @@ class Provider(ABC):
         return bool(self.api_key())
 
     @abstractmethod
-    def count_tokens(self, messages: list[dict]) -> int:
+    def count_tokens(self, messages: list[dict], model: str = "") -> int:
         ...
 
     @abstractmethod
@@ -206,18 +206,22 @@ class Provider(ABC):
 _DEFAULT_RATIO = 4.0
 _ratios: dict[str, float] = {}
 
-# What one image is worth, in the character units `message_chars` counts. About
-# 1,200 tokens at the default ratio, which is the right order for a screenshot
-# at a typical viewport size across the providers that publish their tiling.
-IMAGE_CHARS = 4_800
 
 
-def observe_usage(model: str, prompt_chars: int, prompt_tokens: int) -> None:
+
+def observe_usage(model: str, prompt_chars: int, prompt_tokens: int,
+                  image_cost: int = 0) -> None:
     """Fold one real measurement into the ratio for this model.
 
     Exponential moving average, so a single odd turn -- a huge image, an empty
     prompt -- cannot swing the estimate, but a genuine shift settles in.
+
+    `image_cost` is taken off the token count first. Images have no characters
+    to be a ratio of, so leaving them in taught the estimator that this model
+    packs two characters into a token, and every text-only estimate after that
+    came out nearly double.
     """
+    prompt_tokens -= max(0, image_cost)
     if prompt_tokens <= 0 or prompt_chars <= 0:
         return
     observed = prompt_chars / prompt_tokens
@@ -233,6 +237,30 @@ def chars_per_token(model: str = "") -> float:
     return _ratios.get(model, _DEFAULT_RATIO)
 
 
+def ratios_snapshot() -> dict[str, float]:
+    """What has been learned so far, for persisting."""
+    return dict(_ratios)
+
+
+def restore_ratios(saved: dict) -> None:
+    """Put back what was learned in an earlier run.
+
+    Without this the estimator started from four characters per token on every
+    restart and had to relearn from scratch -- and on a model whose real figure
+    is nearer three, that is a prompt estimate a third too small, which is the
+    difference between compacting in time and overflowing the window
+    mid-answer. It only ever converged within a single process, which is the
+    one place the number was least needed.
+    """
+    for model, ratio in (saved or {}).items():
+        try:
+            value = float(ratio)
+        except (TypeError, ValueError):
+            continue
+        if 1.0 <= value <= 12.0:
+            _ratios[str(model)] = value
+
+
 def message_chars(messages: list[dict]) -> int:
     """Characters the model will actually be billed for, near enough."""
     total = 0
@@ -241,25 +269,50 @@ def message_chars(messages: list[dict]) -> int:
         if isinstance(content, str):
             total += len(content)
         elif isinstance(content, list):
+            # Text parts only. Images are billed by area, not by the length of
+            # their base64, so they cannot be expressed in characters at all --
+            # they are counted separately, in tokens, by `image_tokens`.
             for part in content:
-                if not isinstance(part, dict):
-                    continue
-                if part.get("type") == "text":
+                if isinstance(part, dict) and part.get("type") == "text":
                     total += len(part.get("text", ""))
-                elif part.get("type") in ("image_url", "image"):
-                    # An image is billed by area, not by the length of its
-                    # base64. Counting the base64 would put a screenshot at
-                    # tens of thousands of tokens and trigger a compaction that
-                    # frees nothing; counting it as zero -- which is what
-                    # happened before -- lets a few screenshots overflow a
-                    # window the ring says is a third full. This is roughly
-                    # what a full-window screenshot costs.
-                    total += IMAGE_CHARS
         total += len(m.get("reasoning_content") or "")
         for tc in m.get("tool_calls") or []:
             fn = tc.get("function", {})
             total += len(fn.get("name", "")) + len(fn.get("arguments", "") or "")
         total += 4  # per-message role/framing overhead
+    return total
+
+
+def image_tokens(messages: list[dict]) -> int:
+    """What the images in these messages cost, in tokens.
+
+    Separate from the character count because an image is priced by its area:
+    a 1280x900 screenshot and a 1280x4483 one differ by a factor of five in
+    cost and not at all in the length of the text beside them. Counting them
+    as characters and dividing by the text ratio got this wrong twice over --
+    once in the arithmetic, and once by dragging the learned ratio off course
+    every time a screenshot went past.
+    """
+    from agent_server import images
+
+    total = 0
+    for m in messages:
+        content = m.get("content")
+        if not isinstance(content, list):
+            continue
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            if part.get("type") == "image_url":
+                total += images.cost_of_data_url((part.get("image_url") or {}).get("url", ""))
+            elif part.get("type") == "image":
+                source = part.get("source") or {}
+                if source.get("type") == "base64":
+                    total += images.cost_of_data_url(
+                        f"data:{source.get('media_type', 'image/png')};base64,"
+                        f"{source.get('data', '')}")
+                else:
+                    total += images.DEFAULT_IMAGE_TOKENS
     return total
 
 
@@ -269,4 +322,4 @@ def estimate_tokens(messages: list[dict], model: str = "") -> int:
     Real accounting still comes from the provider's `usage` event; this is what
     the app uses between those, and it is now calibrated by them.
     """
-    return int(message_chars(messages) / chars_per_token(model))
+    return int(message_chars(messages) / chars_per_token(model)) + image_tokens(messages)

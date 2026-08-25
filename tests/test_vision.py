@@ -181,26 +181,87 @@ def test_a_tool_result_is_never_left_with_no_content(tmp_path):
 # ── what an image costs ─────────────────────────────────────────────────────
 
 def test_an_image_is_counted_against_the_context(tmp_path):
-    """Counted as zero, a handful of screenshots overflow a window the ring
-    says is a third full. Counted as its base64, one screenshot looks like
-    tens of thousands of tokens and triggers a compaction that frees nothing."""
-    from agent_server.providers.base import IMAGE_CHARS, message_chars
+    """Counted as zero -- which is where this started -- a handful of
+    screenshots overflow a window the ring says is a third full."""
+    from agent_server.providers.base import estimate_tokens, image_tokens, message_chars
 
-    shot = _png(tmp_path / "shot.png")
+    shot = _png(tmp_path / "shot.png", w=1280, h=900)
     with_image = conversation.to_api_message(_tool_row("ok", [shot]), vision=True)
     without = conversation.to_api_message(_tool_row("ok", [shot]), vision=False)
 
-    cost = message_chars([with_image]) - message_chars([without])
-    assert cost == IMAGE_CHARS
+    # Not as characters: an image has none, and counting it as some drags the
+    # learned characters-per-token ratio off course every time one goes past.
+    assert message_chars([with_image]) == message_chars([without])
+    assert image_tokens([with_image]) == images.token_cost(1280, 900)
+    assert image_tokens([without]) == 0
+    assert estimate_tokens([with_image]) > estimate_tokens([without]) + 1_000
 
-    # And it is a nominal figure, not the length of the base64: an image is
-    # billed by area, and a bigger file is not proportionally more tokens.
-    big = _png(tmp_path / "big.png", w=64, h=64)
-    big_msg = conversation.to_api_message(_tool_row("ok", [big]), vision=True)
-    small_url = len(with_image["content"][1]["image_url"]["url"])
-    big_url = len(big_msg["content"][1]["image_url"]["url"])
-    assert big_url > small_url * 2, "precondition: the second image is much larger"
-    assert message_chars([big_msg]) == message_chars([with_image])
+
+def test_the_cost_is_the_area_not_the_file_size(tmp_path):
+    """A PNG of a photo and a PNG of a flat colour differ enormously in bytes
+    and not at all in what the model is charged for them."""
+    from agent_server.providers.base import image_tokens
+
+    flat = _png(tmp_path / "flat.png", w=640, h=480)
+    same_size_noisy = _png(tmp_path / "noisy.png", w=640, h=480, rgb=(1, 2, 3))
+
+    a = conversation.to_api_message(_tool_row("a", [flat]), vision=True)
+    b = conversation.to_api_message(_tool_row("b", [same_size_noisy]), vision=True)
+    assert image_tokens([a]) == image_tokens([b])
+
+
+def test_the_learned_ratio_is_not_polluted_by_images():
+    """`observe_usage` divides characters by tokens. Images have no characters
+    to be a ratio of, so leaving their tokens in taught the estimator that this
+    model packs two characters into a token and every text estimate after that
+    came out nearly double."""
+    from agent_server.providers import base
+
+    base._ratios.pop("m", None)
+    # 30,000 characters of text plus 5,000 tokens of pictures, billed at 15,000.
+    base.observe_usage("m", 30_000, 15_000, image_cost=5_000)
+    learned = base.chars_per_token("m")
+    base._ratios.pop("m", None)
+    base.observe_usage("m", 30_000, 15_000, image_cost=0)
+    polluted = base.chars_per_token("m")
+    base._ratios.pop("m", None)
+
+    assert learned > polluted, (learned, polluted)
+
+
+def test_what_was_learned_survives_a_restart():
+    """It only ever converged within one process, which is the one place the
+    number was least needed."""
+    from agent_server.providers import base
+
+    base._ratios.pop("m", None)
+    base.restore_ratios({"m": 2.9})
+    assert base.chars_per_token("m") == 2.9
+    # Nonsense is ignored rather than trusted.
+    base.restore_ratios({"m": 99.0, "n": "not a number"})
+    assert base.chars_per_token("m") == 2.9
+    assert base.chars_per_token("n") == 4.0
+    base._ratios.pop("m", None)
+
+
+def test_the_learned_ratio_is_actually_used(tmp_path):
+    """It was recorded on every round and read on none: `count_tokens` never
+    received the model, so every estimate used the hardcoded default."""
+    from agent_server import cache_guard
+    from agent_server.providers import base
+    from agent_server.providers.deepseek import DeepSeekProvider
+
+    provider = DeepSeekProvider()
+    messages = [{"role": "user", "content": "x" * 12_000}]
+
+    base._ratios.pop("m", None)
+    default = sum(cache_guard.slot_tokens(provider, [], messages, "m"))
+    base.restore_ratios({"m": 3.0})
+    learned = sum(cache_guard.slot_tokens(provider, [], messages, "m"))
+    base._ratios.pop("m", None)
+
+    assert learned > default, "the ratio made no difference to the estimate"
+    assert learned == pytest.approx(12_000 / 3.0, rel=0.01)
 
 
 # ── the tools that produce them ─────────────────────────────────────────────
@@ -277,3 +338,75 @@ async def test_a_row_written_before_this_existed_still_works(session):
 
     assert conversation.row_images(rows[-1]) == []
     assert conversation.to_api_message(rows[-1], vision=True)["content"] == "old result"
+
+
+# ── what an image costs, measured rather than assumed ───────────────────────
+
+def test_the_cost_of_an_image_follows_its_area(tmp_path):
+    """Measured against a local Qwen3.8-27B from 64x64 to 1280x2000: linear,
+    at almost exactly a thousand tokens per megapixel. A flat per-image figure
+    was wrong by a factor of five on a full-page screenshot."""
+    small = images.token_cost(1280, 900)
+    tall = images.token_cost(1280, 4483)
+
+    assert tall > small * 4
+    assert 1_000 < small < 2_500, small
+
+
+def test_dimensions_are_read_from_a_header_not_a_decode(tmp_path):
+    shot = _png(tmp_path / "s.png", w=321, h=123)
+    assert images.dimensions(shot.read_bytes()[:1024]) == (321, 123)
+
+
+def test_dimensions_survive_a_file_that_is_not_an_image():
+    assert images.dimensions(b"not an image at all") is None
+    assert images.dimensions(b"") is None
+
+
+def test_an_unreadable_header_costs_something_rather_than_nothing():
+    """Counted as zero, an image nobody could measure is free -- and a few of
+    those overflow the window while the ring says there is room."""
+    assert images.cost_of_data_url("data:image/png;base64,####") == images.DEFAULT_IMAGE_TOKENS
+    assert images.cost_of_data_url("https://example.test/a.png") == images.DEFAULT_IMAGE_TOKENS
+
+
+def test_a_huge_screenshot_is_scaled_before_it_is_sent(tmp_path):
+    """1280x4483 is 7,651 tokens on a machine whose whole window is 43,008,
+    and nothing in it needs that resolution: the model is reading layout and
+    colour, not four-point text."""
+    pytest.importorskip("PIL")
+    tall = _png(tmp_path / "tall.png", w=1200, h=4000)
+
+    kind, data = images.encode(tall)
+    cost = images.cost_of_data_url(f"data:{kind};base64,{data}")
+
+    assert cost < images.token_cost(1200, 4000) / 3
+    assert cost <= images.token_cost(*(images.MAX_IMAGE_PIXELS, 1)) + 50
+
+
+def test_the_file_on_disk_is_left_at_full_resolution(tmp_path):
+    """It is what the person clicks on in the transcript."""
+    pytest.importorskip("PIL")
+    tall = _png(tmp_path / "tall.png", w=1200, h=4000)
+    before = tall.read_bytes()
+
+    images.encode(tall)
+
+    assert tall.read_bytes() == before
+
+
+def test_a_message_has_a_budget_as_well_as_a_count(tmp_path):
+    """Four screenshots of a long page came to 9,194 tokens -- a fifth of a
+    43,008-token window spent on pictures of the same page seconds apart."""
+    shots = [_png(tmp_path / f"s{i}.png", w=1280, h=900) for i in range(4)]
+    kept = images.usable(shots)
+
+    total = sum(images.token_cost(*images._capped_size(p)) for p in kept)
+    assert total <= images.MAX_IMAGE_TOKENS_PER_MESSAGE
+    assert kept, "the budget cannot be so tight that nothing gets through"
+
+
+def test_the_first_image_is_always_sent_however_large(tmp_path):
+    """A budget that can reject everything is a budget that hides the page."""
+    huge = _png(tmp_path / "huge.png", w=2000, h=2000)
+    assert images.usable([huge]) == [str(huge)]

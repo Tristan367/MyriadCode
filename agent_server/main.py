@@ -134,6 +134,16 @@ async def lifespan(app: FastAPI):
     # there is nothing to correlate a restart against.
     log.info("myriadcode starting: data=%s db=%s", DATA_DIR, DB_PATH.name)
     await init_db()
+    # What the token estimator learned in earlier runs. See restore_ratios.
+    try:
+        import json as _json
+
+        from agent_server.database import get_setting
+        from agent_server.providers.base import restore_ratios
+
+        restore_ratios(_json.loads(await get_setting("token_ratios", "{}") or "{}"))
+    except Exception:                                             # noqa: BLE001
+        log.debug("could not restore token ratios", exc_info=True)
     await migrate_prompts()
     await load_tool_description_overrides()
     from agent_server.providers import credentials

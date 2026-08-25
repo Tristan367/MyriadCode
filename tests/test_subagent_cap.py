@@ -82,7 +82,7 @@ class _TrivialProvider:
     def has_credentials(self):
         return True
 
-    def count_tokens(self, messages):
+    def count_tokens(self, messages, model=""):
         return 1
 
     async def chat_completion(self, messages, tools, model,
@@ -191,7 +191,7 @@ class _Counting:
     def has_credentials(self):
         return True
 
-    def count_tokens(self, messages):
+    def count_tokens(self, messages, model=""):
         return 1
 
     async def chat_completion(self, messages, tools, model,
@@ -281,7 +281,7 @@ class _Hierarchy:
     def has_credentials(self):
         return True
 
-    def count_tokens(self, messages):
+    def count_tokens(self, messages, model=""):
         return 1
 
     async def chat_completion(self, messages, tools, model,
@@ -454,7 +454,7 @@ async def test_a_shared_tool_result_does_not_outlive_a_write(fresh, monkeypatch)
         def has_credentials(self):
             return True
 
-        def count_tokens(self, messages):
+        def count_tokens(self, messages, model=""):
             return 1
 
         async def chat_completion(self, messages, tools, model,

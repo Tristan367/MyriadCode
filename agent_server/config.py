@@ -350,10 +350,19 @@ def default_compact_threshold(max_context: int, max_output: int = DEFAULT_MAX_OU
 
 
 # Slack left between the measured prompt and the window when telling a provider
-# how much it may generate. The prompt figure is an estimate calibrated from
-# real usage, not a tokenizer count, so asking for the last token of the window
-# is asking to be wrong by exactly the amount the estimate is off.
+# how much it may generate.
+#
+# The prompt figure is an estimate calibrated from real usage, not a tokenizer
+# count, so asking for the last token of the window is asking to be wrong by
+# exactly the amount the estimate is off -- and it was off by a third on the
+# first run that carried screenshots. A flat 512 was never going to absorb
+# that; a share of the window scales with how much there is to be wrong about.
 OUTPUT_SAFETY_MARGIN = 512
+OUTPUT_SAFETY_SHARE = 0.05
+
+
+def output_margin(max_context: int) -> int:
+    return max(OUTPUT_SAFETY_MARGIN, int(max_context * OUTPUT_SAFETY_SHARE))
 
 # Below this there is no point starting a request: a thinking model needs room
 # to think before it can answer, and a round that dies part-way through a
@@ -379,7 +388,7 @@ def request_output_cap(model_id: str, prompt_tokens: int) -> int | None:
     known = model_id in _ENDPOINT_CONTEXT or model_id in MODELS_BY_ID
     if not window or not known:
         return None
-    room = window - prompt_tokens - OUTPUT_SAFETY_MARGIN
+    room = window - prompt_tokens - output_margin(window)
     # A real, published output ceiling is a hard limit and asking for more is a
     # 400. A guessed one is not a limit at all -- a local server will happily
     # generate until the window is full -- so it must not become one here.

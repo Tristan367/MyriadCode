@@ -53,13 +53,14 @@ async def ensure_window_known(session: dict) -> None:
         log.debug("could not ask %s for its window", provider.name, exc_info=True)
 
 
-def prompt_tokens(provider: Provider, tools: list[dict], messages: list[dict]) -> int:
+def prompt_tokens(provider: Provider, tools: list[dict], messages: list[dict],
+                  model: str = "") -> int:
     """Tokens the given request comes to, tool schemas and system prompt included.
 
     `slot_tokens` is the same per-slot breakdown the cache forecast uses, so
     the two cannot drift apart.
     """
-    return sum(cache_guard.slot_tokens(provider, tools, messages))
+    return sum(cache_guard.slot_tokens(provider, tools, messages, model))
 
 
 async def next_prompt_tokens(session: dict) -> int | None:
@@ -81,7 +82,8 @@ async def next_prompt_tokens(session: dict) -> int | None:
             echo_reasoning=getattr(provider, "echoes_reasoning", True),
             vision=supports_vision(session.get("model", "")),
         )
-        return prompt_tokens(provider, await session_tool_schemas(session), messages)
+        return prompt_tokens(provider, await session_tool_schemas(session), messages,
+                             session.get("model", ""))
     except Exception:                                             # noqa: BLE001
         log.debug("could not measure the next prompt for %s", session.get("id"), exc_info=True)
         return None

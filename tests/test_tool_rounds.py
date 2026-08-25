@@ -28,7 +28,7 @@ class ScriptedProvider:
     def has_credentials(self):
         return True
 
-    def count_tokens(self, messages):
+    def count_tokens(self, messages, model=""):
         return 1
 
     async def chat_completion(self, messages, tools, model,
@@ -116,7 +116,7 @@ class FlakyProvider:
     def has_credentials(self):
         return True
 
-    def count_tokens(self, messages):
+    def count_tokens(self, messages, model=""):
         return 1
 
     async def chat_completion(self, messages, tools, model,
@@ -172,7 +172,7 @@ class AnswerProvider:
     def has_credentials(self):
         return True
 
-    def count_tokens(self, messages):
+    def count_tokens(self, messages, model=""):
         # Proportional to what is actually being sent. It used to return 1 per
         # message, which made every conversation the same size and so made a
         # compaction unmeasurable: the loop now decides from the size of the

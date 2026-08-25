@@ -37,8 +37,8 @@ class OpenAICompatibleProvider(Provider):
             self._client_key = key
         return self._client
 
-    def count_tokens(self, messages: list[dict]) -> int:
-        return estimate_tokens(messages)
+    def count_tokens(self, messages: list[dict], model: str = "") -> int:
+        return estimate_tokens(messages, model)
 
     # ── streaming ──────────────────────────────────────────────────────────
     def _build_kwargs(self, messages: list[dict], tools: list[dict], model: str,

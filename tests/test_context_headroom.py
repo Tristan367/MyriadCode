@@ -29,11 +29,14 @@ from agent_server.conversation import build_messages
 # ── how much a request may generate ─────────────────────────────────────────
 
 def test_a_local_windows_output_room_is_what_is_left_of_it():
+    from agent_server.config import output_margin
+
     remember_endpoint_context("custom:probe", 43008)
     # The whole point: the cap falls as the conversation grows, because on a
     # local server the prompt and the answer come out of the same window.
     assert request_output_cap("custom:probe", 5_000) > request_output_cap("custom:probe", 30_000)
-    assert request_output_cap("custom:probe", 30_000) == 43008 - 30_000 - 512
+    assert (request_output_cap("custom:probe", 30_000)
+            == 43008 - 30_000 - output_margin(43008))
 
 
 def test_a_published_output_ceiling_is_never_exceeded():
@@ -123,7 +126,7 @@ class _Recorder:
     def has_credentials(self):
         return True
 
-    def count_tokens(self, messages):
+    def count_tokens(self, messages, model=""):
         return sum(len(str(m.get("content") or "")) for m in messages) // 4 or 1
 
     async def chat_completion(self, messages, tools, model,
@@ -374,3 +377,117 @@ def model_info_context(model_id: str) -> int:
     from agent_server.config import model_info
 
     return model_info(model_id)["context"]
+
+
+# ── recovering from a window overflow ───────────────────────────────────────
+
+async def test_running_out_of_window_compacts_and_carries_on(session, monkeypatch):
+    """The reported failure. A round filled the window mid-thought and the turn
+    ended with "ask it to continue", which is advice that cannot work: the same
+    over-long prompt goes back and stops in the same place, now with the failed
+    round's output in front of it as well. The conversation has to get smaller,
+    and that is something this loop can do."""
+    remember_endpoint_context("custom:probe", 43008)
+
+    class _Overflows(_Recorder):
+        rounds = 0
+
+        async def chat_completion(self, messages, tools, model,
+                                  thinking_effort=None, max_tokens=None):
+            type(self).rounds += 1
+            if type(self).rounds == 1:
+                yield {"type": "content", "text": "half an ans"}
+                yield {"type": "usage", "usage": {"prompt_tokens": 41_000,
+                                                  "completion_tokens": 2_000}}
+                yield {"type": "finish", "reason": "length"}
+            else:
+                yield {"type": "content", "text": "done"}
+                yield {"type": "finish", "reason": "stop"}
+
+    _Overflows.rounds = 0
+    provider = _Overflows()
+    monkeypatch.setattr(agent, "get_provider", lambda _p: provider)
+
+    compacted = []
+
+    async def fake_compact(session_id, **kwargs):
+        compacted.append(session_id)
+        for row in await db.get_messages(session_id):
+            if row["role"] == "assistant":
+                await db.update_message(row["id"], content="x")
+        return {"ok": True, "original_tokens": 41_000, "compressed_tokens": 500}
+
+    import agent_server.compaction as compaction_mod
+    monkeypatch.setattr(compaction_mod, "compact_session", fake_compact)
+
+    events = [e async for e in agent.run(session["id"])]
+
+    assert compacted, "the turn died instead of making room and retrying"
+    assert any(e["type"] == "compacted" for e in events)
+    assert events[-1]["type"] == "done", [e["type"] for e in events]
+    warnings = [e for e in events if e["type"] == "notice"]
+    assert warnings and "ran out of room" in warnings[0]["message"]
+
+
+async def test_it_only_tries_that_once(session, monkeypatch):
+    """A conversation that still does not fit after a summary will not fit
+    after the next one either."""
+    remember_endpoint_context("custom:probe", 43008)
+
+    class _AlwaysOverflows(_Recorder):
+        async def chat_completion(self, messages, tools, model,
+                                  thinking_effort=None, max_tokens=None):
+            yield {"type": "content", "text": "..."}
+            yield {"type": "usage", "usage": {"prompt_tokens": 41_000,
+                                              "completion_tokens": 2_000}}
+            yield {"type": "finish", "reason": "length"}
+
+    monkeypatch.setattr(agent, "get_provider", lambda _p: _AlwaysOverflows())
+
+    calls = []
+
+    async def fake_compact(session_id, **kwargs):
+        calls.append(session_id)
+        return {"ok": True, "original_tokens": 41_000, "compressed_tokens": 40_900}
+
+    import agent_server.compaction as compaction_mod
+    monkeypatch.setattr(compaction_mod, "compact_session", fake_compact)
+
+    events = [e async for e in agent.run(session["id"])]
+
+    assert len(calls) <= 1, f"summarised {len(calls)} times over the same overflow"
+    errors = [e for e in events if e["type"] == "error"]
+    assert errors, "it gave up without saying so"
+    assert "context window" in errors[-1]["message"]
+
+
+async def test_an_ordinary_output_limit_still_says_to_continue(session, monkeypatch):
+    """The other half of the distinction: a model that filled its own output
+    ceiling with plenty of window left *can* be told to carry on."""
+    remember_endpoint_context("custom:probe", 43008)
+
+    class _HitsCeiling(_Recorder):
+        async def chat_completion(self, messages, tools, model,
+                                  thinking_effort=None, max_tokens=None):
+            yield {"type": "content", "text": "a long answer"}
+            yield {"type": "usage", "usage": {"prompt_tokens": 3_000,
+                                              "completion_tokens": 8_192}}
+            yield {"type": "finish", "reason": "length"}
+
+    monkeypatch.setattr(agent, "get_provider", lambda _p: _HitsCeiling())
+
+    events = [e async for e in agent.run(session["id"])]
+
+    assert not any(e["type"] == "compacting" for e in events)
+    errors = [e for e in events if e["type"] == "error"]
+    assert errors and "continue" in errors[-1]["message"]
+
+
+def test_the_output_margin_scales_with_the_window():
+    """A flat 512 tokens was never going to absorb an estimate that came out a
+    third short."""
+    from agent_server.config import output_margin
+
+    assert output_margin(43_008) > 512
+    assert output_margin(1_000_000) > output_margin(43_008)
+    assert output_margin(4_096) == 512

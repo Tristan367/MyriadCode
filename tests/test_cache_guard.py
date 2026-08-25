@@ -17,7 +17,7 @@ MSGS = [
 
 
 class FakeProvider:
-    def count_tokens(self, messages):
+    def count_tokens(self, messages, model=""):
         return sum(len(m.get("content") or "") // 4 for m in messages)
 
 

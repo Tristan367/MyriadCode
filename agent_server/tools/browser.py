@@ -199,12 +199,26 @@ async def _perform(ctx, session, action: str, step: dict):
         to = step.get("to", "bottom")
         if target is not None:
             await target.scroll_into_view_if_needed(timeout=timeout)
-        elif to == "top":
+            return ""
+        if to == "top":
             await page.evaluate("window.scrollTo(0, 0)")
-        elif to == "bottom":
+            return ""
+        if to == "bottom":
             await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-        else:
-            await page.evaluate(f"window.scrollBy(0, {int(to)})")
+            return ""
+        try:
+            pixels = int(to)
+        except (TypeError, ValueError):
+            # `{"action": "scroll", "to": "#contact"}` is the obvious way to
+            # ask for a section, and it used to die on int("#contact") with
+            # "invalid literal for int() with base 10" -- an error about our
+            # own parsing, offered to a model that had asked for something
+            # perfectly sensible. Three steps of one real flow failed this way
+            # and the model never worked out what it had done wrong. Take the
+            # selector.
+            await _locate(page, str(to)).first.scroll_into_view_if_needed(timeout=timeout)
+            return {"text": f"scrolled to {to}"}
+        await page.evaluate(f"window.scrollBy(0, {pixels})")
         return ""
 
     if action == "wait":

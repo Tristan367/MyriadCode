@@ -99,8 +99,8 @@ class AnthropicProvider(Provider):
         self._client = None
         self._client_key = ""
 
-    def count_tokens(self, messages: list[dict]) -> int:
-        return estimate_tokens(messages)
+    def count_tokens(self, messages: list[dict], model: str = "") -> int:
+        return estimate_tokens(messages, model)
 
     def _build_kwargs(
         self, messages: list[dict], tools: list[dict], model: str, thinking_effort: str | None,
