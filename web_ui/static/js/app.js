@@ -769,13 +769,16 @@ function handleEvent(event, stream) {
       break;
 
     case 'usage':
-      // The provider's own accounting for the round that just finished.
-      // Better than the estimate that has been driving the ring, so adopt it:
-      // the next round's prompt is this round's prompt plus what it generated,
-      // give or take the tool results still to come.
-      if (Live.active && event.usage) {
-        Live.prompt = (event.usage.prompt_tokens || Live.prompt)
-          + (event.usage.completion_tokens || 0);
+      // The provider's own count for the round that just finished, which is
+      // better than the estimate that has been driving the ring -- for that
+      // round. It is *not* the next round's prompt, and it used to be treated
+      // as one: prompt + completion assumed everything generated gets sent
+      // back, and thinking does not (see `echoes_reasoning`). On a model that
+      // thinks in ten-thousand-token blocks that overshot by the whole block,
+      // and the next `working` event then corrected it downwards, which read
+      // as the number being unreliable rather than as thinking being dropped.
+      if (Live.active && event.usage && event.usage.completion_tokens) {
+        Live.generated = event.usage.completion_tokens;
         Live.chars = 0;
         applyLiveContext();
       }
@@ -849,13 +852,14 @@ function flushRender(stream) {
  * this going to run out before it finishes?" and wants an answer now rather
  * than an exact one later.
  */
-const Live = { prompt: 0, chars: 0, ratio: 4.0, window: 0, active: false };
+const Live = { prompt: 0, chars: 0, generated: 0, ratio: 4.0, window: 0, active: false };
 
 function beginLiveContext(event) {
   Live.prompt = event.prompt_tokens || 0;
   Live.ratio = event.chars_per_token || 4.0;
   Live.window = event.window || 0;
   Live.chars = 0;
+  Live.generated = 0;
   Live.active = Live.prompt > 0;
   paintLiveContext();
 }
@@ -891,8 +895,12 @@ function paintLiveContext() {
   });
 }
 
+function liveGenerated() {
+  return Live.generated || Math.round(Live.chars / (Live.ratio || 4.0));
+}
+
 function liveTokens() {
-  return Live.prompt + Math.round(Live.chars / (Live.ratio || 4.0));
+  return Live.prompt + liveGenerated();
 }
 
 /* Also called after every htmx swap of #session-meta: the swap replaces the
@@ -920,9 +928,19 @@ function applyLiveContext() {
   // The question during a long thinking block is how much room is left, which
   // is a token count and not a percentage -- a percentage of the compaction
   // threshold says nothing about whether the answer will fit in the window.
+  //
+  // The split matters too. This figure climbs while a model thinks and then
+  // drops back when the round ends, because thinking is not re-sent -- which
+  // looks exactly like a broken counter unless the two halves are named. So
+  // name them.
+  const generated = liveGenerated();
   const room = Live.window ? Live.window - tokens : 0;
   ring.title =
     `${tokens.toLocaleString()} / ${threshold.toLocaleString()} tokens (${Math.round(percent)}%), live` +
+    (generated
+      ? `\nConversation ${Live.prompt.toLocaleString()} + ${generated.toLocaleString()} written this round`
+        + '\nThinking is not re-sent, so this drops back when the round ends'
+      : '') +
     (Live.window ? `\nRoom left in the window: ${Math.max(0, room).toLocaleString()}` : '') +
     '\n\nClick to compact or change the threshold';
 }
@@ -1229,8 +1247,11 @@ function el(tag, className, text) {
  * always goes on the title. Anything short enough to fit shows the same text
  * twice, which costs nothing. */
 function roleEl(text) {
-  const node = el('div', 'msg-role', text);
+  const node = el('div', 'msg-role');
   node.title = text;
+  // The text gets its own box so an over-long label is cut at its end rather
+  // than its start -- see .msg-role in the stylesheet.
+  node.appendChild(el('span', 'msg-role-text', text));
   return node;
 }
 
@@ -1506,6 +1527,23 @@ function collapseReasoning(textEl) {
   const details = textEl.closest('details');
   if (details) details.open = false;
 }
+
+/* A thinking block is one element that is scrollable when open and clamped to
+ * a single line when shut -- so `scrollTop` survives the collapse, and the one
+ * line on show is wherever the reader had scrolled to: the bottom half of one
+ * line above the top half of another. Rewind it, so what is left is the first
+ * line, which is what a summary is for.
+ *
+ * `toggle` does not bubble, hence the capture phase; and it fires for the
+ * user's click and for the automatic collapse alike, which is both of the ways
+ * this happens. */
+document.addEventListener('toggle', (e) => {
+  const details = e.target;
+  if (!(details instanceof HTMLElement) || details.tagName !== 'DETAILS') return;
+  if (details.open) return;
+  const summary = details.querySelector(':scope > .reasoning-summary');
+  if (summary) summary.scrollTop = 0;
+}, true);
 
 /* With the transcript-decluttering options on, only the *current* thinking
  * block and tool call stay visible; once the agent moves on they are hidden. */
@@ -1931,13 +1969,17 @@ function highlightToolCode(root) {
     if (!code) return;
     const lang = pre.dataset.lang || '';
     const start = Number(pre.dataset.start || 1);
-    const lines = code.textContent.split('\n');
-    if (lines.length && lines[lines.length - 1] === '') lines.pop();
+    // Highlighted whole and then cut into lines, not highlighted line by
+    // line: a block comment or a <script> inside HTML only makes sense to the
+    // highlighter if it sees the whole thing at once.
+    const raw = code.textContent;
+    const lines = md.highlightLines(raw, lang);
+    if (lines.length && raw.endsWith('\n')) lines.pop();
     pre.style.setProperty('--lnw', lnWidth(start + Math.max(0, lines.length - 1)));
     const frag = document.createDocumentFragment();
     lines.forEach((line, i) => {
       const row = numberedRow(start + i);
-      row.querySelector('.lc').innerHTML = md.highlight(line, lang) || ' ';
+      row.querySelector('.lc').innerHTML = line || ' ';
       frag.appendChild(row);
     });
     code.replaceChildren(frag);
@@ -2205,11 +2247,25 @@ function appendPermissionCard(event) {
    * result to reason from and has moved on. One box, filled in before either
    * button, is the whole feature. */
   let noteEl = null;
+  let noteRow = null;
   if (kind !== 'denied') {
+    noteRow = el('div', 'permission-note-row');
     noteEl = el('input', 'permission-note');
     noteEl.type = 'text';
     noteEl.placeholder = 'Optional note to the agent — sent with either answer';
     noteEl.spellcheck = false;
+    noteRow.appendChild(noteEl);
+    // Everything else in this app can be dictated; a box that appears at the
+    // exact moment you want to say "not that, do this instead" should not be
+    // the one place you have to type.
+    if (sttAvailable()) {
+      const mic = el('button', 'permission-note-mic');
+      mic.type = 'button';
+      mic.title = 'Dictate this note';
+      mic.innerHTML = MIC_ICON_SVG;
+      mic.addEventListener('click', () => Dictation.borrow(noteEl, mic));
+      noteRow.appendChild(mic);
+    }
     // Enter in the note takes the safe option. Approving on a keystroke inside
     // a text box is not something to do by accident.
     noteEl.addEventListener('keydown', (e) => {
@@ -2252,7 +2308,7 @@ function appendPermissionCard(event) {
   }
 
   node.append(head, detail, sub, ...(pwWrap ? [pwWrap] : []),
-              ...(noteEl ? [noteEl] : []), actions);
+              ...(noteRow ? [noteRow] : []), actions);
   appendRow(node);
   autoscroll();
   actions.querySelector('button')?.focus();
@@ -3002,6 +3058,20 @@ function button(label, className, onClick) {
 
 const MIC_TITLE = 'Dictate \u2014 click to toggle, or press Ctrl+M';
 
+/* The same glyph as the composer's mic, for anywhere else that borrows
+   dictation. Kept beside MIC_TITLE so the two do not drift apart. */
+const MIC_ICON_SVG =
+  '<svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true">' +
+  '<path fill="currentColor" d="M12 14a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v5a3 3 0 0 0 3 3z"/>' +
+  '<path fill="currentColor" d="M17 11a1 1 0 1 1 2 0 7 7 0 0 1-6 6.93V21a1 1 0 1 1-2 0v-3.07A7 7 0 0 1 5 11a1 1 0 1 1 2 0 5 5 0 0 0 10 0z"/>' +
+  '</svg>';
+
+/* Whether the server has speech-to-text at all. The composer's mic button is
+   only rendered when it does, so its presence is the answer. */
+function sttAvailable() {
+  return !!document.getElementById('mic-btn');
+}
+
 /* Persisted microphone preferences: input gain (dB) and the chosen input
  * device. Both live in localStorage because they are browser/device concerns --
  * a deviceId is per-browser and per-origin, so a server round-trip would not
@@ -3196,6 +3266,48 @@ const Dictation = {
   transcribeTimer: null,
   els: {},
 
+  /* Where the words go. The composer, unless something has borrowed dictation
+   * for a field of its own -- the note on a permission card is the first, and
+   * the mechanism is deliberately general because the next one will not be the
+   * last. `borrow` hands it over; teardown always hands it back, so a field
+   * that is removed from the page mid-recording cannot keep the microphone
+   * pointed at a detached node. */
+  targetEl: null,
+
+  target() {
+    const el = this.targetEl;
+    if (el && el.isConnected) return el;
+    this.targetEl = null;
+    return App.els.textarea;
+  },
+
+  borrowedButton: null,
+
+  /* Dictate into `field` instead of the composer, for one recording. */
+  async borrow(field, button) {
+    if (this.recording) {
+      // Pressing it again stops, which is the same gesture as the composer's.
+      await this.toggle();
+      if (this.targetEl === field || !field) return;
+    }
+    this.targetEl = field;
+    this.borrowedButton = button || null;
+    if (button) button.classList.add('recording');
+    this.bindStopOnEdit(field);
+    field.focus();
+    await this.toggle();
+  },
+
+  /* A manual edit while recording abandons dictation cleanly rather than
+     letting the segment offsets drift out of step with the text. */
+  bindStopOnEdit(field) {
+    if (!field || field.dataset.dictBound) return;
+    field.dataset.dictBound = '1';
+    field.addEventListener('input', () => {
+      if (this.recording) this.teardown();
+    });
+  },
+
   init() {
     this.els.button = document.getElementById('mic-btn');
     this.els.meter = document.getElementById('mic-meter');
@@ -3212,18 +3324,13 @@ const Dictation = {
     // those offsets and corrupts the transcript. Any user edit while recording
     // therefore just stops dictation (a clean abandon) and leaves the text
     // alone; toggle again to keep dictating from the new caret.
-    if (App.els.textarea && !App.els.textarea.dataset.dictBound) {
-      App.els.textarea.dataset.dictBound = '1';
-      App.els.textarea.addEventListener('input', () => {
-        if (this.recording) this.teardown();
-      });
-    }
+    this.bindStopOnEdit(App.els.textarea);
   },
 
   async toggle() {
     if (this.recording) {
       const text = await this.stop();
-      if (text) insertAtCursor(App.els.textarea, text);
+      if (text) insertAtCursor(this.target(), text);
     } else {
       await this.start();
     }
@@ -3377,7 +3484,7 @@ const Dictation = {
     this.streamRef = stream;
     this.watchForLoss(stream);
     this.partial = '';
-    const ta = App.els.textarea;
+    const ta = this.target();
     this.insertAt = ta ? (ta.selectionStart ?? ta.value.length) : 0;
     this.insertedLen = 0;
     this.lastInserted = '';
@@ -3474,7 +3581,7 @@ const Dictation = {
    * segment, ownership is dropped and only the new suffix is appended, so their
    * edits are never reverted. */
   updateDictationSegment(text) {
-    const ta = App.els.textarea;
+    const ta = this.target();
     if (!ta) return;
     // Only rewrite the textarea when the hypothesis actually changed: rewriting
     // on every partial would clear any selection the user is dragging and stop
@@ -3518,7 +3625,10 @@ const Dictation = {
       }
     }
     ta.focus();
-    autosize(ta);
+    // Only the composer grows with its content; a one-line note field has no
+    // autosize to run and passing it one would reach for properties it has not
+    // got.
+    if (ta === App.els.textarea) autosize(ta);
   },
 
   /* Transcription is the one stretch with no feedback: the recorder has stopped,
@@ -3557,7 +3667,7 @@ const Dictation = {
     watchMicTrack(stream, async (label) => {
       if (!this.recording && !this.starting) return;
       const text = await this.stop();
-      if (text) insertAtCursor(App.els.textarea, text);
+      if (text) insertAtCursor(this.target(), text);
       appendNotice('error', `${label} disconnected — dictation stopped.`);
     });
   },
@@ -3576,6 +3686,14 @@ const Dictation = {
       this.els.button.classList.remove('recording', 'transcribing');
       this.els.button.title = MIC_TITLE;
     }
+    if (this.borrowedButton) {
+      this.borrowedButton.classList.remove('recording');
+      this.borrowedButton = null;
+    }
+    // Hand the microphone back to the composer. A borrowed field can be gone
+    // by now -- the card it was on is removed the moment the call is approved
+    // -- and the next dictation must not still be aimed at it.
+    this.targetEl = null;
   },
 
   /* Reuse one AudioContext and route the mic through a GainNode so the
@@ -4502,7 +4620,12 @@ window.addEventListener('blur', () => {
 });
 
 function setupMessageSide() {
-  document.querySelectorAll('.message:not([data-side-done])').forEach((node) => {
+  // A permission card is a question waiting for an answer, not a message.
+  // There is nothing on it worth copying -- the command it is asking about is
+  // about to appear in the tool row underneath either way -- and a copy button
+  // beside Approve/Reject reads as a third thing you might be meant to press.
+  document.querySelectorAll('.message:not([data-side-done]):not(.permission-card)')
+    .forEach((node) => {
     node.dataset.sideDone = '1';
     const side = el('span', 'msg-side');
     const time = node.querySelector('.msg-time');
@@ -5601,13 +5724,14 @@ const FileEditor = (() => {
     if (!lines.length) lines.push('');
     bodyEl.style.setProperty('--lnw', lnWidth(Math.max(1, lines.length)));
     const plain = text.length > HIGHLIGHT_LIMIT;
+    const painted = plain ? lines.map(md.escapeHtml) : md.highlightLines(text, s.lang);
     const frag = document.createDocumentFragment();
     lines.forEach((line, i) => {
       const n = i + 1;
       const row = el('div', 'fe-line' + (inRange(n) ? ' fe-hl' : ''));
       row.appendChild(el('span', 'fe-ln', String(n)));
       const code = el('span', 'fe-code');
-      code.innerHTML = plain ? (md.escapeHtml(line) || ' ') : (md.highlight(line, s.lang) || ' ');
+      code.innerHTML = painted[i] || ' ';
       row.appendChild(code);
       frag.appendChild(row);
     });

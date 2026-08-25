@@ -484,6 +484,15 @@ hr { border: 0; border-top: 1px solid var(--border); margin: 6px 0; }
  * bubble, tool output, a diff and an open thinking block. Prose, which has no
  * box, sits on the column itself. */
 
+/* The label is right-aligned against the content column. A plain block that
+   is right-aligned and overflowing is clipped at its *start*, so "working"
+   arrived as "orking" with the W sliced down the middle -- and `text-overflow`
+   does nothing about it, because the overflow is not at the end.
+
+   A flex row justified to the end, with the text in a box of its own, cuts the
+   end instead and marks it with an ellipsis. The cell also reaches one
+   content-pad to its left, into the page margin, which is empty: that is free
+   width, and it is the difference between "working" fitting and not. */
 .msg-role {
   font-size: 10.5px;
   font-family: var(--mono);
@@ -491,13 +500,21 @@ hr { border: 0; border-top: 1px solid var(--border); margin: 6px 0; }
   letter-spacing: 0.05em;
   color: var(--text-faint);
   padding-top: 3px;
-  text-align: right;
+  display: flex;
+  justify-content: flex-end;
+  align-items: flex-start;
+  margin-left: calc(-1 * var(--content-pad));
   /* Keeps clear of the gutter, which the activity marker hangs in. */
   padding-right: 6px;
   overflow: hidden;
-  text-overflow: ellipsis;
   opacity: 0;
   transition: opacity 120ms ease;
+}
+.msg-role-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .message:hover .msg-role { opacity: 1; }
 
@@ -943,11 +960,28 @@ a.file-ref:hover { border-bottom-style: solid; color: var(--text); background: v
 
 /* Sits between the command and the buttons, because it is filled in before a
    decision rather than after one. */
+.permission-note-row {
+  display: flex;
+  align-items: stretch;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+.permission-note-mic {
+  flex: 0 0 auto;
+  width: 30px;
+  min-height: 0;
+  padding: 0;
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  color: var(--text-faint);
+}
+.permission-note-mic:hover { color: var(--text); }
+.permission-note-mic.recording { color: var(--danger); border-color: var(--danger); }
 .permission-note {
   display: block;
-  width: 100%;
+  flex: 1 1 auto;
+  min-width: 0;
   box-sizing: border-box;
-  margin-bottom: 10px;
   padding: 6px 9px;
   background: var(--bg-inset);
   border: 1px solid var(--border);
@@ -2725,10 +2759,18 @@ dialog.file-browser::backdrop { background: transparent; }
   font-size: 11.5px;
   line-height: 1.45;
 }
+/* Square. It spans the full width of the panel and sits against the panel's
+   own bottom and side edges, so a radius of its own would round *inside* the
+   container's corner and leave a sliver of background showing through the gap
+   -- two curves of different tightness meeting, which reads as a mistake
+   rather than as a shape. Anything that meets a container's border is flush
+   with it; the dialog's own rounded corner does the rounding, via the
+   `overflow: hidden` on it. */
 .fb-side-clear {
   flex: 0 0 auto;
   padding: 7px 10px;
   border: 0;
+  border-radius: 0;
   border-top: 1px solid var(--border);
   background: transparent;
   color: var(--text-faint);
@@ -2764,6 +2806,9 @@ dialog.file-browser::backdrop { background: transparent; }
   width: 14px;
   padding: 0;
   border: 0;
+  /* Square, for the same reason as the Clear button: it runs the full height
+     of the dialog and meets its top and bottom edges. */
+  border-radius: 0;
   border-right: 1px solid var(--border);
   background: var(--bg-inset);
   color: var(--text-faint);

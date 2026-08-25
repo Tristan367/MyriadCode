@@ -207,8 +207,18 @@ def _wire_listeners(session: Session, page):
     page.on("pageerror", lambda e: session.note(ConsoleEntry("pageerror", str(e))))
 
     def on_request_failed(request):
-        failure = request.failure
-        reason = failure.get("errorText", "unknown") if failure else "unknown"
+        # `request.failure` is a plain string in Playwright for Python -- it is
+        # Node's API that hands back `{errorText}`. Calling .get() on it raised
+        # inside the event handler, and pyee re-raises a listener's exception
+        # into whatever operation happens to be in flight: the failure surfaced
+        # as `Page.screenshot: 'str' object has no attribute 'get'`, on a call
+        # that had nothing to do with it.
+        #
+        # So a single failed request -- one missing image, one 404 favicon --
+        # poisoned the next screenshot or evaluate on that page. Pages that
+        # load cleanly were fine, which is why this looked intermittent rather
+        # than broken.
+        reason = request.failure or "unknown"
         session.note(ConsoleEntry(
             "request", f"{request.method} {request.url} failed: {reason}"
         ))

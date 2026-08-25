@@ -1,7 +1,7 @@
 <div id="messages">
     {% for c in compactions %}
     <div class="message compaction">
-        <div class="msg-role" title="summary">summary</div>
+        <div class="msg-role" title="summary"><span class="msg-role-text">summary</span></div>
         <div class="msg-content">
             <details class="tool-details">
                 <summary class="tool-summary">
@@ -46,7 +46,7 @@
     <div class="message tool {% if m.is_error %}tool-error{% endif %}" id="msg-{{ m.id }}"
          data-tool-call-id="{{ m.tool_call_id or '' }}"
          {%- if m.file_path %} data-path="{{ m.file_path }}"{% endif %}>
-        <div class="msg-role" title="{{ m.tool_name or 'result' }}">{{ m.tool_name or 'result' }}</div>
+        <div class="msg-role" title="{{ m.tool_name or 'result' }}"><span class="msg-role-text">{{ m.tool_name or 'result' }}</span></div>
         <div class="msg-content">
             {% set input_text = tool_inputs.get(m.tool_call_id) %}
             {% if m.diff and m.tool_name == 'edit' %}
@@ -118,7 +118,7 @@
     <div class="message thinking" id="msg-{{ m.id }}-thinking">
         {# "think", not "thinking": the role column is 50px and right-aligned, so a
    longer word is clipped at its *start* -- "thinking" rendered as "NKING". #}
-        <div class="msg-role" title="thinking">think</div>
+        <div class="msg-role" title="thinking"><span class="msg-role-text">think</span></div>
         <div class="msg-content">
             <details class="tool-details reasoning-details"{% if 'reasoning' in expand_tools %} data-expand="1"{% endif %}>
                 <summary class="reasoning-summary">{{ m.reasoning_content }}</summary>
@@ -129,7 +129,7 @@
     {% endif %}
     {% if body or attached or m.role != 'assistant' %}
     <div class="message {{ m.role }}{% if m.mail_from %} mail{% endif %}" id="msg-{{ m.id }}">
-        <div class="msg-role" title="{{ m.mail_from or m.role }}">{{ m.mail_from or m.role }}</div>
+        <div class="msg-role" title="{{ m.mail_from or m.role }}"><span class="msg-role-text">{{ m.mail_from or m.role }}</span></div>
         <div class="msg-content">
 
 
@@ -176,7 +176,7 @@
        this back into an interactive card once it has loaded. #}
     <div class="message notice notice-pending" id="pending-restore"
          data-pending="{{ pending | tojson | forceescape }}">
-        <div class="msg-role" title="paused">paused</div>
+        <div class="msg-role" title="paused"><span class="msg-role-text">paused</span></div>
         <div class="msg-content">
             <div class="content-text">This run is waiting for you to approve a tool call. Reload if you don't see it.</div>
         </div>

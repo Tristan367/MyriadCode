@@ -32,6 +32,63 @@
     return escapeHtml(code);
   }
 
+  /* Cut highlighted HTML into one string per line, reopening on each line
+   * whatever spans were still open at the break.
+   *
+   * The tokens hljs emits are `<span class=...>`, `</span>` and escaped text,
+   * and nothing else -- escaped text can contain no raw `<` -- so this is a
+   * complete grammar for its output rather than an attempt at parsing HTML.
+   */
+  function splitHighlighted(html) {
+    const lines = [];
+    const open = [];
+    let current = '';
+    const token = /<span\b[^>]*>|<\/span>|\n|[^<\n]+|</g;
+    let m;
+    while ((m = token.exec(html)) !== null) {
+      const tok = m[0];
+      if (tok === '\n') {
+        lines.push(current + '</span>'.repeat(open.length));
+        current = open.join('');
+      } else if (tok === '</span>') {
+        open.pop();
+        current += tok;
+      } else if (tok.charCodeAt(0) === 60 && tok.charCodeAt(1) !== 47 && tok.length > 1) {
+        open.push(tok);
+        current += tok;
+      } else {
+        current += tok;
+      }
+    }
+    lines.push(current + '</span>'.repeat(open.length));
+    return lines;
+  }
+
+  /* Highlight a whole block, then hand back its lines.
+   *
+   * This exists because the line-numbered views used to call `highlight` once
+   * per line, and a highlighter has no memory between calls. Two things broke
+   * that way, both reported from real files:
+   *
+   *   - a block comment only coloured its first line, because the lines after
+   *     it never saw the `/*` that opened it;
+   *   - `<script>` inside an HTML file was not highlighted as JavaScript at
+   *     all. hljs hands the body of a script tag to its javascript grammar as
+   *     a sub-language, and it can only do that when it is given the tag and
+   *     its contents together.
+   */
+  function highlightLines(code, lang) {
+    const text = String(code == null ? '' : code);
+    const key = (lang || '').toLowerCase();
+    if (key && text.length <= MAX_HIGHLIGHT_CHARS && global.hljs) {
+      try {
+        return splitHighlighted(
+          global.hljs.highlight(text, { language: key, ignoreIllegals: true }).value);
+      } catch (_) { /* unknown language: fall through to plain text */ }
+    }
+    return text.split('\n').map(escapeHtml);
+  }
+
   /* A path starts with /, ~/, ./, ../, or a directory segment, then runs on.
    *
    * It used to run to the next whitespace, which breaks every path containing a
@@ -330,7 +387,7 @@
     return html.join('\n');
   }
 
-  global.md = { render, escapeHtml, highlight };
+  global.md = { render, escapeHtml, highlight, highlightLines };
 })(window);
 
 function copyCode(button) {

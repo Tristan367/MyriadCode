@@ -212,18 +212,40 @@ async def test_a_meta_refresh_does_not_undo_the_live_figure(page):
 
 
 async def test_the_providers_own_count_replaces_the_estimate(page):
-    """The running total is characters over a ratio. The moment the provider
-    says what it really was, that is the better number and it wins."""
+    """The running total is characters over a ratio; the provider's count of
+    what it generated is the real figure, and it wins.
+
+    It replaces the *generated* half only. It used to be added to the prompt as
+    though everything generated gets sent back on the next round, and thinking
+    does not -- so on a model that thinks in ten-thousand-token blocks the ring
+    overshot by the whole block and was then corrected downwards by the next
+    round, which read as the counter being unreliable.
+    """
     await _working(page)
-    await _think(page, 16_000)
+    await _think(page, 16_000)     # estimated as 4,000 tokens
 
     await page.evaluate("""
         () => handleEvent({ type: 'usage',
-                            usage: { prompt_tokens: 30000, completion_tokens: 1000 } },
+                            usage: { prompt_tokens: 20000, completion_tokens: 1000 } },
                           window._s)
     """)
     await page.wait_for_timeout(350)
 
     ring = await _ring(page)
-    expected = round(100 * 31_000 / WINDOW)
+    # The prompt this round was sent with, plus what it actually generated.
+    expected = round(100 * (PROMPT + 1_000) / WINDOW)
     assert ring["label"] == f"{expected}%", ring
+    assert f"{PROMPT:,} + 1,000" in ring["title"], ring["title"]
+
+
+async def test_the_ring_says_why_it_is_about_to_fall(page):
+    """It climbs while a model thinks and drops back when the round ends,
+    because thinking is not re-sent. That is correct and it looks exactly like
+    a broken counter, so the two halves are named."""
+    await _working(page)
+    await _think(page, 16_000)
+
+    title = (await _ring(page))["title"]
+    assert f"Conversation {PROMPT:,}" in title, title
+    assert "4,000 written this round" in title, title
+    assert "not re-sent" in title, title
