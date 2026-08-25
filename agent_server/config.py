@@ -85,30 +85,35 @@ MODELS = [
         "name": "DeepSeek V4 Pro",
         "provider": "deepseek",
         "context": 1_000_000,
+        "vision": True,
     },
     {
         "id": "deepseek-v4-flash",
         "name": "DeepSeek V4 Flash",
         "provider": "deepseek",
         "context": 1_000_000,
+        "vision": True,
     },
     {
         "id": "openai/gpt-4.1",
         "name": "GPT-4.1",
         "provider": "openrouter",
         "context": 1_000_000,
+        "vision": True,
     },
     {
         "id": "google/gemini-2.5-pro",
         "name": "Gemini 2.5 Pro",
         "provider": "openrouter",
         "context": 1_000_000,
+        "vision": True,
     },
     {
         "id": "meta-llama/llama-4-maverick",
         "name": "Llama 4 Maverick",
         "provider": "openrouter",
         "context": 1_000_000,
+        "vision": True,
     },
     # Anthropic, per platform.claude.com/docs/en/about-claude/models/overview,
     # checked 2026-08-10. Opus's context and output ceiling had both been wrong
@@ -119,6 +124,7 @@ MODELS = [
         "provider": "anthropic",
         "context": 1_000_000,
         "max_output": 128_000,
+        "vision": True,
     },
     {
         "id": "claude-opus-5",
@@ -126,6 +132,7 @@ MODELS = [
         "provider": "anthropic",
         "context": 1_000_000,
         "max_output": 128_000,
+        "vision": True,
     },
     {
         "id": "claude-sonnet-5",
@@ -133,6 +140,7 @@ MODELS = [
         "provider": "anthropic",
         "context": 1_000_000,
         "max_output": 128_000,
+        "vision": True,
     },
     {
         "id": "claude-haiku-4-5",
@@ -140,6 +148,7 @@ MODELS = [
         "provider": "anthropic",
         "context": 200_000,
         "max_output": 64_000,
+        "vision": True,
     },
     # Gemini direct, rather than through OpenRouter: the Flash models have a
     # free tier on a Google key, which makes them the cheap seat for subagents,
@@ -151,18 +160,21 @@ MODELS = [
         "name": "Gemini 3.7 Flash",
         "provider": "gemini",
         "context": 1_000_000,
+        "vision": True,
     },
     {
         "id": "gemini-3.5-flash-lite",
         "name": "Gemini 3.5 Flash Lite",
         "provider": "gemini",
         "context": 1_000_000,
+        "vision": True,
     },
     {
         "id": "gemini-3.1-pro-preview",
         "name": "Gemini 3.1 Pro",
         "provider": "gemini",
         "context": 1_000_000,
+        "vision": True,
     },
 ]
 
@@ -237,6 +249,31 @@ def _model_info(model_id: str) -> dict:
     if not entry:
         return {**UNKNOWN_MODEL, "id": model_id}
     return {"max_output": DEFAULT_MAX_OUTPUT, **entry}
+
+
+# Custom endpoints are assumed to be able to see images.
+#
+# There is no way to ask: an OpenAI-compatible /models listing says nothing
+# about modality, and the only reliable test is to send one and see. Assuming
+# yes is the useful default -- most locally-served models worth driving an
+# agent with are multimodal now, and the cost of being wrong is one clear
+# error from the server rather than silence. Set CODEAGENT_CUSTOM_VISION=0 for
+# a text-only endpoint.
+CUSTOM_ENDPOINT_VISION = (os.getenv("CODEAGENT_CUSTOM_VISION") or "1") != "0"
+
+
+def supports_vision(model_id: str) -> bool:
+    """Whether images may be sent to this model.
+
+    Sending one to a text-only model is not a small mistake: at best the
+    provider rejects the request and the turn dies, at worst it silently drops
+    the part and the model answers about an image it never saw. So the default
+    for anything unrecognised is no.
+    """
+    if model_id in _ENDPOINT_CONTEXT or model_id.startswith("custom:"):
+        return CUSTOM_ENDPOINT_VISION
+    entry = MODELS_BY_ID.get(model_id)
+    return bool(entry and entry.get("vision"))
 
 
 def provider_for_model(model_id: str) -> str:

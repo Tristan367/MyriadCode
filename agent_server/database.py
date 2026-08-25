@@ -203,6 +203,9 @@ MIGRATIONS: list[tuple[str, str, str]] = [
     # derived, because deriving it would silently rewrite the prefix the moment
     # the user typed again and re-bill the whole conversation at the miss rate.
     ("messages", "send_reasoning", "INTEGER DEFAULT 1"),
+    # Image paths this message carries to the model, as a JSON array. A
+    # screenshot is only worth taking if the model can look at it.
+    ("messages", "images", "TEXT"),
     # Which tools are disabled for this prompt profile (JSON array of names).
     ("prompts", "disabled_tools", "TEXT"),
     # Subagent system prompt body for this profile. NULL uses the built-in default.
@@ -558,13 +561,14 @@ async def add_message(
     lang: str = "",
     code: str = "",
     code_start: int = 1,
+    images: tuple[str, ...] | list[str] = (),
 ) -> dict:
     """Insert a message. `tool_calls` is stored as canonical OpenAI wire JSON."""
     msg_id = await _execute(
         "INSERT INTO messages (session_id, role, content, reasoning_content, tool_calls,"
         " tool_call_id, tool_name, is_error, token_count, usage, diff, tool_title,"
-        " duration_ms, file_path, mail_from, lang, code, code_start, created_at)"
-        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        " duration_ms, file_path, mail_from, lang, code, code_start, images, created_at)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (
             session_id,
             role,
@@ -584,6 +588,7 @@ async def add_message(
             lang or None,
             code or None,
             code_start if code_start else 1,
+            json.dumps(list(images)) if images else None,
             _now(),
         ),
     )

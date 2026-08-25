@@ -88,6 +88,15 @@ class ToolResult:
     # than parsed back out of `title`, which is left-truncated for display and so
     # is not a path at all for anything nested more than a couple of levels deep.
     file_path: str = ""
+    # Images the model should actually look at, as absolute paths.
+    #
+    # Unlike `code` and `diff`, which are for the human, these go *to the
+    # model*: the paths are read at request time and sent as image parts. A
+    # tool that produces a picture -- a screenshot, a chart, a photo the user
+    # asked about -- hands the path over here rather than only mentioning it in
+    # `output`, because a path in the text is a string to the model and nothing
+    # more. See agent_server/images.py.
+    images: tuple[str, ...] = ()
     # Token usage for tools that call a model themselves, so their spend is
     # attributed to the session instead of vanishing.
     usage: dict | None = None

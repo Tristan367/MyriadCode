@@ -19,6 +19,7 @@ import logging
 
 from agent_server import cache_guard
 from agent_server import database as db
+from agent_server.config import supports_vision
 from agent_server.conversation import build_messages
 from agent_server.providers import Provider, get_provider
 from agent_server.system_prompt import session_system_prompt, session_tool_schemas
@@ -78,6 +79,7 @@ async def next_prompt_tokens(session: dict) -> int | None:
             await db.get_compactions(session["id"]),
             await db.get_messages(session["id"]),
             echo_reasoning=getattr(provider, "echoes_reasoning", True),
+            vision=supports_vision(session.get("model", "")),
         )
         return prompt_tokens(provider, await session_tool_schemas(session), messages)
     except Exception:                                             # noqa: BLE001

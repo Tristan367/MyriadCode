@@ -334,10 +334,12 @@ def _convert_messages(messages: list[dict]) -> list[dict]:
             continue
 
         if role == "tool":
+            content = m.get("content")
             pending_results.append({
                 "type": "tool_result",
                 "tool_use_id": m.get("tool_call_id") or "unknown",
-                "content": m.get("content") or "(no output)",
+                "content": (_convert_parts(content) if isinstance(content, list)
+                            else (content or "(no output)")),
                 "is_error": bool(m.get("is_error")),
             })
             continue
@@ -364,7 +366,7 @@ def _convert_messages(messages: list[dict]) -> list[dict]:
         elif role == "user":
             content = m.get("content")
             if isinstance(content, list):
-                _append(out, "user", content)
+                _append(out, "user", _convert_parts(content))
             elif content:
                 _append(out, "user", [{"type": "text", "text": content}])
 
@@ -374,6 +376,49 @@ def _convert_messages(messages: list[dict]) -> list[dict]:
     while out and out[0]["role"] != "user":
         out.pop(0)
     return out
+
+
+def _convert_parts(parts: list) -> list[dict]:
+    """OpenAI content parts to Anthropic blocks.
+
+    Images are stored once, in the OpenAI shape, and translated per provider on
+    the way out -- rather than every provider inventing its own storage and the
+    database holding four dialects of the same picture.
+    """
+    out: list[dict] = []
+    for part in parts:
+        if not isinstance(part, dict):
+            continue
+        if part.get("type") == "image_url":
+            url = (part.get("image_url") or {}).get("url") or ""
+            block = _data_url_block(url)
+            if block:
+                out.append(block)
+        elif part.get("type") == "image":
+            out.append(part)      # already Anthropic-shaped
+        elif part.get("type") == "text":
+            out.append({"type": "text", "text": part.get("text", "")})
+    # A tool_result with no blocks at all is rejected; keep something in it.
+    return out or [{"type": "text", "text": "(no output)"}]
+
+
+def _data_url_block(url: str) -> dict | None:
+    """`data:image/png;base64,AAAA` to an Anthropic image block.
+
+    A remote URL is not fetched and re-encoded here: Anthropic takes a URL
+    source directly, and downloading someone else's image through this process
+    is not something the conversation layer should quietly start doing.
+    """
+    if url.startswith("data:"):
+        head, _, data = url.partition(",")
+        media = head[5:].split(";", 1)[0] or "image/png"
+        if not data:
+            return None
+        return {"type": "image",
+                "source": {"type": "base64", "media_type": media, "data": data}}
+    if url.startswith(("http://", "https://")):
+        return {"type": "image", "source": {"type": "url", "url": url}}
+    return None
 
 
 def _append(out: list[dict], role: str, blocks: list[dict]) -> None:

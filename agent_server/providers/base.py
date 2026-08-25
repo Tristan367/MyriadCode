@@ -206,6 +206,11 @@ class Provider(ABC):
 _DEFAULT_RATIO = 4.0
 _ratios: dict[str, float] = {}
 
+# What one image is worth, in the character units `message_chars` counts. About
+# 1,200 tokens at the default ratio, which is the right order for a screenshot
+# at a typical viewport size across the providers that publish their tiling.
+IMAGE_CHARS = 4_800
+
 
 def observe_usage(model: str, prompt_chars: int, prompt_tokens: int) -> None:
     """Fold one real measurement into the ratio for this model.
@@ -237,8 +242,19 @@ def message_chars(messages: list[dict]) -> int:
             total += len(content)
         elif isinstance(content, list):
             for part in content:
-                if isinstance(part, dict) and part.get("type") == "text":
+                if not isinstance(part, dict):
+                    continue
+                if part.get("type") == "text":
                     total += len(part.get("text", ""))
+                elif part.get("type") in ("image_url", "image"):
+                    # An image is billed by area, not by the length of its
+                    # base64. Counting the base64 would put a screenshot at
+                    # tens of thousands of tokens and trigger a compaction that
+                    # frees nothing; counting it as zero -- which is what
+                    # happened before -- lets a few screenshots overflow a
+                    # window the ring says is a third full. This is roughly
+                    # what a full-window screenshot costs.
+                    total += IMAGE_CHARS
         total += len(m.get("reasoning_content") or "")
         for tc in m.get("tool_calls") or []:
             fn = tc.get("function", {})

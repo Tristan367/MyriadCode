@@ -4,6 +4,7 @@ import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 
+from agent_server import images
 from agent_server.tools.base import ToolContext, ToolResult, diff_stats, truncate, unified_diff
 
 MAX_READ_BYTES = 2_000_000
@@ -163,6 +164,30 @@ def has_read(session_id: str, path: Path) -> bool:
     return _snapshot(session_id, path) is not None
 
 
+def _read_image(path, title: str) -> ToolResult:
+    """Hand the picture itself back, not a sentence about it.
+
+    Whether it reaches the model depends on the model: `supports_vision` gates
+    the images out again for one that cannot see, and then this result is a
+    line of text saying what the file is -- which is still better than an
+    error, because the size and the format are sometimes the whole question.
+    """
+    size = path.stat().st_size
+    if size > images.MAX_IMAGE_BYTES:
+        return ToolResult(
+            output=(f"{path} is an image of {size:,} bytes, which is over the "
+                    f"{images.MAX_IMAGE_BYTES:,} byte limit for sending one to the "
+                    f"model. Resize it and read the smaller copy to look at it."),
+            title=title, file_path=str(path),
+        )
+    return ToolResult(
+        output=f"{path} ({images.media_type(path)}, {size:,} bytes)",
+        title=title,
+        file_path=str(path),
+        images=(str(path),),
+    )
+
+
 async def read_file(
     ctx: ToolContext,
     *,
@@ -186,6 +211,13 @@ async def read_file(
             output=f"{path} is a directory. Contents:\n" + "\n".join(entries[:200]),
             title=_title_path(path),
         )
+    # An image is not text, but it is not unreadable either -- it is the one
+    # binary a model may actually be able to make sense of. Handing back
+    # "cannot read binary file as text" for a screenshot the agent had just
+    # taken was the reason it went on to reason about the CSS instead of
+    # looking at the page.
+    if images.is_sendable(path):
+        return _read_image(path, title)
     if path.suffix.lower() in BINARY_SUFFIXES:
         return ToolResult.error(f"cannot read binary file as text: {path}", title)
     if path.stat().st_size > MAX_READ_BYTES:

@@ -29,6 +29,7 @@ from agent_server.config import (
     MIN_OUTPUT_TOKENS,
     model_info,
     request_output_cap,
+    supports_vision,
 )
 from agent_server.conversation import (
     build_messages,
@@ -648,6 +649,7 @@ async def _loop(
             await db.get_compactions(session_id),
             rows,
             echo_reasoning=getattr(provider, "echoes_reasoning", True),
+            vision=supports_vision(session["model"]),
         )
         fp_tokens = cache_guard.slot_tokens(provider, tools, messages)
         # Same arithmetic the header uses, from one definition -- see
@@ -1441,6 +1443,11 @@ async def _record(session_id: str, call: dict, result: ToolResult, duration_ms: 
         lang=result.lang,
         code=result.code,
         code_start=result.code_start,
+        # Unlike `diff` and `code`, these do go back to the model -- as image
+        # parts, on the next request. Stored as paths rather than as bytes so
+        # the transcript stays small and a screenshot that has been deleted
+        # since simply stops being sent.
+        images=result.images,
         # Subagents bill against this session; without this their spend is
         # simply not counted anywhere.
         usage=result.usage,

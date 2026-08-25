@@ -105,10 +105,51 @@ def tool_call_name(tool_call: dict) -> str:
     return tool_call.get("function", {}).get("name", "")
 
 
-def to_api_message(row: dict, echo_reasoning: bool = True) -> dict:
-    """Convert one stored message row into a wire message."""
+def _image_part(path: str) -> dict:
+    """The OpenAI content part. Anthropic's adapter rewrites these on its way
+    out -- the stored form is one shape, converted per provider, rather than
+    each provider inventing its own storage."""
+    from agent_server import images as image_parts
+
+    return image_parts.openai_part(path)
+
+
+def row_images(row: dict) -> list[str]:
+    """Image paths stored on a message, if any."""
+    raw = row.get("images")
+    if not raw:
+        return []
+    if isinstance(raw, list):
+        return [str(p) for p in raw]
+    try:
+        parsed = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return []
+    return [str(p) for p in parsed] if isinstance(parsed, list) else []
+
+
+def to_api_message(row: dict, echo_reasoning: bool = True, vision: bool = False) -> dict:
+    """Convert one stored message row into a wire message.
+
+    `vision` decides whether any images the row carries are sent. A path in the
+    text is not an image to a model -- it has no filesystem and cannot fetch
+    anything -- so the bytes have to travel as a content part or not at all.
+    Off by default, because sending an image to a text-only model either fails
+    the request or, worse, gets quietly dropped and answered about anyway.
+    """
     role = row["role"]
     msg: dict[str, Any] = {"role": role, "content": row.get("content") or ""}
+
+    if vision and role in ("user", "tool"):
+        from agent_server import images as image_parts
+
+        paths = image_parts.usable(row_images(row))
+        if paths:
+            # Text first: an image with no words attached is a question with no
+            # question in it, and the providers that care about ordering all
+            # want the text to lead.
+            msg["content"] = [{"type": "text", "text": msg["content"] or "(image)"}]
+            msg["content"].extend(_image_part(p) for p in paths)
 
     if role == "assistant":
         tool_calls = normalize_tool_calls(row.get("tool_calls"))
@@ -222,6 +263,7 @@ def build_messages(
     compactions: list[dict],
     rows: list[dict],
     echo_reasoning: bool = True,
+    vision: bool = False,
 ) -> list[dict]:
     """Assemble the full request payload for a turn."""
     messages: list[dict] = [{"role": "system", "content": system_prompt}]
@@ -230,5 +272,5 @@ def build_messages(
             "role": "system",
             "content": f"[Summary of earlier conversation]\n{c['summary_text']}",
         })
-    messages.extend(to_api_message(r, echo_reasoning) for r in rows)
+    messages.extend(to_api_message(r, echo_reasoning, vision) for r in rows)
     return sanitize(messages)

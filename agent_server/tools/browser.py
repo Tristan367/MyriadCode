@@ -11,15 +11,22 @@ diagnose it (console, accessibility tree, screenshot) are gathered without
 being asked.
 """
 
+import contextlib
 import json
 import re
 from pathlib import Path
 
 from agent_server import browser as engine
+from agent_server import images as engine_images
 from agent_server.browser import locate as _locate
 from agent_server.tools.base import ToolContext, ToolResult
 
 MAX_STEPS = 24
+
+# How long `expect console_clean` waits for the page to go quiet before
+# deciding nothing went wrong. Long enough for a failing subresource to report
+# itself, short enough not to be felt on a page that is already idle.
+CONSOLE_SETTLE_MS = 1500
 
 # Actions that name a target element.
 _TARGETED = {"click", "fill", "press", "hover", "select", "check", "uncheck", "upload"}
@@ -122,7 +129,14 @@ async def _run(ctx, session, steps, stop_on_error) -> ToolResult:
 
     report = await _report(ctx, session, lines, frames, failed_at, len(steps))
     title = _title(session, steps, failed_at)
-    return ToolResult(output=report, is_error=bool(failed_at), title=title)
+    # The screenshots go *with* the result, not merely as paths inside it. A
+    # path is a string to a model -- it has no filesystem -- so a tool that
+    # takes a picture and reports where it put it has told a multimodal model
+    # nothing it can use, and leaves it reasoning about the CSS instead of
+    # looking at the page. The newest frames, because when several were taken
+    # the last is the one the flow ended on.
+    return ToolResult(output=report, is_error=bool(failed_at), title=title,
+                      images=tuple(engine_images.usable(reversed(frames))))
 
 
 # ── Actions ─────────────────────────────────────────────────────────────────
@@ -324,6 +338,18 @@ async def _expect(session, step: dict, at: str, timeout: int):
         return {"text": f"{found} matched"}
 
     if step.get("console_clean"):
+        # Subresources report their failures *after* `load`. A <video src> that
+        # 404s, a font, an image: the page is loaded and the console is quiet,
+        # and a second later it is not. A check that runs the instant `load`
+        # fires therefore says "console is clean" about a page that is about to
+        # complain -- which is exactly what happened on a real page, and the
+        # model believed it and moved on.
+        #
+        # So let the page go quiet first. Failing to reach network idle is not
+        # itself a problem worth reporting: a page with a websocket or a poll
+        # never reaches it, and the console entries are checked either way.
+        with contextlib.suppress(Exception):
+            await page.wait_for_load_state("networkidle", timeout=CONSOLE_SETTLE_MS)
         problems = session.errors()
         if problems:
             listed = "\n".join(f"  {p.render()}" for p in problems[:10])
