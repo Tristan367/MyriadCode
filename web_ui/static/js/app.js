@@ -5820,6 +5820,195 @@ const FileBrowser = (() => {
 
   function here() { return lastDirs[memKey()] || workingDir(); }
 
+  /* ── Places: where this session has been ──────────────────────────────────
+   *
+   * A file manager opened from a session is nearly always going back to one of
+   * a handful of directories -- the package being worked on, its tests, one
+   * config folder -- and reaching them meant walking down from the project
+   * root every time. The server records a visit on every listing (it is the
+   * one place all navigation passes through) and this draws them.
+   *
+   * Two orderings, because they answer different questions. "Recent" is for
+   * carrying on where you left off. "Frequent" is for the two or three folders
+   * a task keeps returning to, which recency buries the moment you look
+   * anywhere else. */
+  const PLACES_MODE_KEY = 'fb-places-mode';
+  const PLACES_HIDDEN_KEY = 'fb-places-hidden';
+  let sideEl = null, placesEl = null;
+  let places = { recent: [], frequent: [] };
+
+  function placesMode() {
+    try { return localStorage.getItem(PLACES_MODE_KEY) === 'frequent' ? 'frequent' : 'recent'; }
+    catch { return 'recent'; }
+  }
+  function placesHidden() {
+    try { return localStorage.getItem(PLACES_HIDDEN_KEY) === '1'; }
+    catch { return false; }
+  }
+  function setStored(key, value) {
+    try { localStorage.setItem(key, value); }
+    catch { /* private browsing: the choice still holds for this dialog */ }
+  }
+
+  async function loadPlaces() {
+    if (!App.sessionId) { places = { recent: [], frequent: [] }; renderPlaces(); return; }
+    try {
+      const resp = await fetch(
+        `/api/files/recent-dirs?session_id=${encodeURIComponent(App.sessionId)}`);
+      places = resp.ok ? await resp.json() : { recent: [], frequent: [] };
+    } catch {
+      places = { recent: [], frequent: [] };
+    }
+    renderPlaces();
+  }
+
+  /* Navigation already told the server; this keeps the sidebar in step without
+   * a second request per click. The next open re-reads the truth. */
+  function bumpPlace(path) {
+    if (!path) return;
+    const row = places.recent.find((p) => p.path === path);
+    if (row) {
+      row.visits += 1;
+      places.recent = [row, ...places.recent.filter((p) => p !== row)];
+    } else {
+      places.recent = [{ path, visits: 1, last_visited_at: '' }, ...places.recent].slice(0, 60);
+    }
+    places.frequent = [...places.recent].sort((a, b) => b.visits - a.visits);
+    renderPlaces();
+  }
+
+  /* A full path is too long for a narrow column and its distinctive end is on
+     the right, so a row is a name plus where it lives -- relative to the
+     project root when it is inside it, which is nearly always. */
+  /* The identifying end of a path is the right-hand one, so when a parent is
+     too long to fit, the left is what goes. Done here rather than with
+     `direction: rtl`, which moves a leading "/" to the far end and renders
+     "/home/tristan" as "home/tristan/". */
+  // Narrower than it looks like it should be: the column is 218px, the visit
+  // count sits in it too, and anything that does not fit is cut by CSS from
+  // the right -- taking off exactly the end that identifies the path.
+  const PLACE_SUB_MAX = 20;
+
+  /* Cut whole directories rather than characters, so what is left is a path
+     someone can read: "…/Projects/Soapbox", not "…stan/Projects/Soapbox". */
+  function elideLeft(text) {
+    if (text.length <= PLACE_SUB_MAX) return text;
+    const parts = String(text).split('/').filter(Boolean);
+    let kept = '';
+    for (let i = parts.length - 1; i >= 0; i--) {
+      const next = parts[i] + (kept ? '/' + kept : '');
+      if (next.length + 1 > PLACE_SUB_MAX) break;
+      kept = next;
+    }
+    // A single directory name longer than the whole budget has no boundary to
+    // cut on, so that one does fall back to characters.
+    return kept ? '…/' + kept : '…' + text.slice(-(PLACE_SUB_MAX - 1));
+  }
+
+  /* Every row reads as "folder" over "where it lives", and the second line is
+     the containing directory relative to the project. A direct child of the
+     project root gets the root's own name rather than the words "the project
+     root", so the column says the same kind of thing on every line. */
+  function placeParts(path) {
+    const clean = String(path).replace(/\/+$/, '') || '/';
+    const name = clean.slice(clean.lastIndexOf('/') + 1) || clean;
+    const parent = clean.slice(0, clean.lastIndexOf('/')) || '/';
+    const root = String(App.projectDir || '').replace(/\/+$/, '');
+    const rootName = root.slice(root.lastIndexOf('/') + 1) || root;
+    if (root && clean === root) return { name: name || clean, sub: 'project root' };
+    if (root && parent === root) return { name, sub: elideLeft(rootName) };
+    if (root && parent.startsWith(root + '/')) {
+      return { name, sub: elideLeft(parent.slice(root.length + 1)) };
+    }
+    return { name, sub: elideLeft(parent) };
+  }
+
+  function renderPlaces() {
+    if (!placesEl) return;
+    const mode = placesMode();
+    sideEl.querySelectorAll('.fb-mode').forEach((b) => {
+      b.classList.toggle('active', b.dataset.mode === mode);
+    });
+
+    const rows = places[mode] || [];
+    placesEl.textContent = '';
+
+    // The working directory is always offered, so the sidebar is useful on the
+    // first open of a session -- before there is any history to show.
+    const root = String(App.projectDir || '').replace(/\/+$/, '');
+    const frag = document.createDocumentFragment();
+    if (root) frag.appendChild(placeRow({ path: root }, { pinned: true }));
+    for (const row of rows) {
+      if (String(row.path).replace(/\/+$/, '') === root) continue;   // already pinned
+      frag.appendChild(placeRow(row, { showCount: mode === 'frequent' }));
+    }
+    placesEl.appendChild(frag);
+
+    if (!rows.length) {
+      placesEl.appendChild(el('div', 'fb-side-empty',
+        'Folders you open in this session collect here.'));
+    }
+    markCurrentPlace();
+  }
+
+  function placeRow(row, opts = {}) {
+    const { name, sub } = placeParts(row.path);
+    const item = el('div', 'fb-place' + (opts.pinned ? ' fb-place-pinned' : ''));
+    item.dataset.path = row.path;
+    item.title = row.path;
+
+    item.appendChild(el('span', 'fb-place-icon', opts.pinned ? '⌂' : '▸'));
+    const text = el('div', 'fb-place-text');
+    text.appendChild(el('span', 'fb-place-name', name));
+    text.appendChild(el('span', 'fb-place-sub', opts.pinned ? 'working directory' : sub));
+    item.appendChild(text);
+
+    if (opts.showCount && row.visits > 1) {
+      item.appendChild(el('span', 'fb-place-count', String(row.visits)));
+    }
+    if (!opts.pinned) {
+      const forget = el('button', 'fb-place-forget', '×');
+      forget.type = 'button';
+      forget.title = 'Forget this directory';
+      forget.addEventListener('click', (e) => { e.stopPropagation(); forgetPlace(row.path); });
+      item.appendChild(forget);
+    }
+    item.addEventListener('click', () => open(row.path));
+    return item;
+  }
+
+  function markCurrentPlace() {
+    if (!placesEl) return;
+    const current = String(basePath || '').replace(/\/+$/, '');
+    placesEl.querySelectorAll('.fb-place').forEach((item) => {
+      item.classList.toggle('current',
+        String(item.dataset.path).replace(/\/+$/, '') === current);
+    });
+  }
+
+  async function forgetPlace(path) {
+    places.recent = places.recent.filter((p) => p.path !== path);
+    places.frequent = places.frequent.filter((p) => p.path !== path);
+    renderPlaces();
+    if (!App.sessionId) return;
+    try {
+      await fetch('/api/files/forget-dir', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session_id: App.sessionId, path: path || '' }),
+      });
+    } catch { /* the row is already gone from the list; it returns on reload */ }
+  }
+
+  function applySideVisibility() {
+    if (!dlg) return;
+    dlg.classList.toggle('fb-side-collapsed', placesHidden());
+    const btn = dlg.querySelector('[data-fb=toggleside]');
+    if (btn) {
+      btn.textContent = placesHidden() ? '›' : '‹';
+      btn.title = placesHidden() ? 'Show places' : 'Hide places';
+    }
+  }
+
   function ensure() {
     if (dlg) return;
     dlg = document.createElement('dialog');
@@ -5838,7 +6027,25 @@ const FileBrowser = (() => {
           '<input type="checkbox" data-fb="showall"> Show all</label>' +
         '<button type="button" class="fe-btn" data-fb="close" title="Close">&times;</button>' +
       '</div>' +
-      '<div class="fb-list"></div>' +
+      '<div class="fb-body">' +
+        '<aside class="fb-side">' +
+          '<div class="fb-side-head">' +
+            '<span class="fb-side-title">Places</span>' +
+            '<div class="fb-side-modes" role="tablist">' +
+              '<button type="button" class="fb-mode" data-mode="recent" ' +
+                'title="Most recently opened first">Recent</button>' +
+              '<button type="button" class="fb-mode" data-mode="frequent" ' +
+                'title="Most often opened first">Frequent</button>' +
+            '</div>' +
+          '</div>' +
+          '<div class="fb-places"></div>' +
+          '<button type="button" class="fb-side-clear" data-fb="clearplaces" ' +
+            'title="Forget every directory this session has visited">Clear history</button>' +
+        '</aside>' +
+        '<button type="button" class="fb-side-toggle" data-fb="toggleside" ' +
+          'title="Show or hide places"></button>' +
+        '<div class="fb-list"></div>' +
+      '</div>' +
       '<div class="fb-pick" hidden>' +
         '<span class="fb-pick-info"></span>' +
         '<button type="button" class="fe-btn fe-save" data-fb="usedir">Use this directory</button>' +
@@ -5870,6 +6077,24 @@ const FileBrowser = (() => {
 
     pathEl = dlg.querySelector('.fb-path');
     listEl = dlg.querySelector('.fb-list');
+    sideEl = dlg.querySelector('.fb-side');
+    placesEl = dlg.querySelector('.fb-places');
+    sideEl.querySelectorAll('.fb-mode').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        setStored(PLACES_MODE_KEY, btn.dataset.mode);
+        renderPlaces();
+      });
+    });
+    dlg.querySelector('[data-fb=toggleside]').addEventListener('click', () => {
+      setStored(PLACES_HIDDEN_KEY, placesHidden() ? '0' : '1');
+      applySideVisibility();
+    });
+    dlg.querySelector('[data-fb=clearplaces]').addEventListener('click', async () => {
+      places = { recent: [], frequent: [] };
+      renderPlaces();
+      await forgetPlace('');
+    });
+    applySideVisibility();
     showAllEl = dlg.querySelector('[data-fb=showall]');
     showAllEl.checked = showAll();
     showAllEl.addEventListener('change', () => {
@@ -5983,8 +6208,13 @@ const FileBrowser = (() => {
     syncMode();
     const recordIt = opts.record !== false;
     if (!path) path = here();
-    if (!dlg.open) dlg.showModal();
+    const firstOpen = !dlg.open;
+    if (firstOpen) dlg.showModal();
     reposition();
+    // Re-read the history when the dialog opens rather than on every
+    // navigation: browsing updates it locally, so this is one request per
+    // opening rather than one per click.
+    if (firstOpen) loadPlaces();
     pathEl.value = path;
     listEl.textContent = '';
     const spinner = el('div', 'fb-note', 'Loading\u2026');
@@ -6011,6 +6241,10 @@ const FileBrowser = (() => {
     basePath = data.path;
     lastDirs[memKey()] = data.path;
     if (recordIt) record(data.path);
+    // The listing above already told the server; mirror it locally so the
+    // sidebar reorders as you browse. `record: false` is the "show all" toggle
+    // re-listing the same directory, which is not a visit.
+    if (recordIt) bumpPlace(data.path); else markCurrentPlace();
     /* Hidden entries are hidden. A project root is mostly dot-directories and
        they crowd out everything worth clicking. Filtered here rather than at
        the server so the toggle costs no round trip, and before anything indexes
@@ -6138,6 +6372,11 @@ const FileBrowser = (() => {
     // open into. Everything that only touches the disk stays.
     dlg.querySelector('[data-fb=open]').hidden = attachMode || pickMode;
     dlg.classList.toggle('fb-picking', pickMode);
+    // The history is per session, and the picker runs before any session
+    // exists. An empty sidebar promising to fill up would be a promise the
+    // picker cannot keep, so it goes away entirely.
+    dlg.classList.toggle('fb-no-side', pickMode || !App.sessionId);
+    applySideVisibility();
   }
 
   /* Keep the dialog's bottom edge above the chat input. The composer grows with

@@ -2538,7 +2538,194 @@ dialog.file-browser::backdrop { background: transparent; }
   font-size: 12px;
 }
 .fb-path:focus { border-color: var(--accent-dim); }
-.fb-list { flex: 1 1 auto; overflow: auto; padding: 4px 0; }
+/* ── The places sidebar ──────────────────────────────────────────────────────
+   Directories this session has opened, so getting back to one is a click
+   rather than a walk down from the project root. */
+.fb-body {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+.fb-side {
+  flex: 0 0 218px;
+  width: 218px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-right: 1px solid var(--border);
+  background: var(--bg-inset);
+}
+.fb-side-head {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 9px 10px 8px;
+  border-bottom: 1px solid var(--border);
+}
+.fb-side-title {
+  font-family: var(--sans);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+/* Two states of one control, so it reads as a switch rather than as two
+   buttons that happen to be adjacent. */
+.fb-side-modes {
+  display: flex;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 2px;
+  gap: 2px;
+}
+.fb-mode {
+  flex: 1 1 0;
+  padding: 3px 0;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--text-faint);
+  font-family: var(--sans);
+  font-size: 11px;
+  cursor: pointer;
+  transition: background 90ms ease, color 90ms ease;
+}
+.fb-mode:hover { color: var(--text); }
+.fb-mode.active {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+.fb-places { flex: 1 1 auto; overflow: auto; padding: 4px 0; }
+.fb-place {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  padding: 4px 8px 5px 10px;
+  cursor: pointer;
+  /* The left edge is where "current" is marked, and a transparent border in
+     the resting state keeps the text from shifting 2px when it becomes so. */
+  border-left: 2px solid transparent;
+}
+.fb-place:hover { background: var(--bg-hover); }
+.fb-place.current {
+  background: var(--bg-hover);
+  border-left-color: var(--accent);
+}
+/* Aligned with the name rather than with the middle of the row. A two-line row
+   centred vertically puts the mark between the two lines, which reads as
+   belonging to neither. */
+.fb-place-icon {
+  flex: 0 0 auto;
+  width: 10px;
+  text-align: center;
+  color: var(--text-faint);
+  font-size: 11px;
+  line-height: 16px;
+}
+.fb-place.current .fb-place-icon,
+.fb-place-pinned .fb-place-icon { color: var(--accent-dim); }
+/* min-width: 0 is what lets the two lines below actually ellipsize; without it
+   a flex child refuses to shrink past its content and the row overflows. */
+.fb-place-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.fb-place-name {
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 16px;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.fb-place.current .fb-place-name { color: var(--accent); }
+.fb-place-sub {
+  font-family: var(--sans);
+  font-size: 10.5px;
+  color: var(--text-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.fb-place-count {
+  flex: 0 0 auto;
+  align-self: center;
+  min-width: 17px;
+  padding: 1px 4px;
+  border-radius: 8px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--text-faint);
+  font-family: var(--mono);
+  font-size: 10px;
+  text-align: center;
+}
+/* Only on hover: a column of × marks turns a quiet list into a busy one, and
+   forgetting a directory is rare next to visiting one. */
+.fb-place-forget {
+  flex: 0 0 auto;
+  align-self: center;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--text-faint);
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 90ms ease;
+}
+.fb-place:hover .fb-place-forget { opacity: 1; }
+.fb-place-forget:hover { background: var(--bg-raised, var(--bg)); color: var(--danger); }
+.fb-place-forget:focus-visible { opacity: 1; }
+.fb-side-empty {
+  padding: 10px;
+  color: var(--text-faint);
+  font-family: var(--sans);
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+.fb-side-clear {
+  flex: 0 0 auto;
+  padding: 7px 10px;
+  border: 0;
+  border-top: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-faint);
+  font-family: var(--sans);
+  font-size: 11px;
+  text-align: left;
+  cursor: pointer;
+}
+.fb-side-clear:hover { color: var(--text); background: var(--bg-hover); }
+/* A full-height hairline that widens into a grab strip on hover. */
+.fb-side-toggle {
+  flex: 0 0 auto;
+  width: 11px;
+  padding: 0;
+  border: 0;
+  border-right: 1px solid var(--border);
+  background: var(--bg-inset);
+  color: var(--text-faint);
+  font-size: 10px;
+  line-height: 1;
+  cursor: pointer;
+}
+.fb-side-toggle:hover { background: var(--bg-hover); color: var(--text); }
+.fb-side-collapsed .fb-side { display: none; }
+.fb-no-side .fb-side,
+.fb-no-side .fb-side-toggle { display: none; }
+
+.fb-list { flex: 1 1 auto; overflow: auto; padding: 4px 0; min-width: 0; }
 .fb-row {
   display: flex;
   align-items: center;

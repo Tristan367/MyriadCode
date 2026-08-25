@@ -69,6 +69,14 @@ CREATE TABLE IF NOT EXISTS session_write_dirs (
     PRIMARY KEY (session_id, path)
 );
 
+CREATE TABLE IF NOT EXISTS session_dir_visits (
+    session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    path TEXT NOT NULL,
+    visits INTEGER NOT NULL DEFAULT 1,
+    last_visited_at TEXT NOT NULL,
+    PRIMARY KEY (session_id, path)
+);
+
 CREATE TABLE IF NOT EXISTS prompts (
     kind TEXT NOT NULL DEFAULT 'system',
     name TEXT NOT NULL,
@@ -835,6 +843,52 @@ async def remove_write_dir(session_id: str, path: str):
     await _execute(
         "DELETE FROM session_write_dirs WHERE session_id = ? AND path = ?", (session_id, path)
     )
+
+
+# ── Directories visited, per session ────────────────────────────────────────
+
+# How many rows a session keeps. Old ones are dropped by last visit, so a
+# session that ranges over a large tree does not accumulate a row per folder
+# forever -- and nothing below the cut would ever have been shown anyway.
+MAX_DIR_VISITS = 60
+
+
+async def record_dir_visit(session_id: str, path: str) -> None:
+    """Note that this session looked at this directory."""
+    await _execute(
+        "INSERT INTO session_dir_visits (session_id, path, visits, last_visited_at)"
+        " VALUES (?,?,1,?)"
+        " ON CONFLICT(session_id, path) DO UPDATE SET"
+        "   visits = visits + 1, last_visited_at = excluded.last_visited_at",
+        (session_id, path, _now()),
+    )
+    await _execute(
+        "DELETE FROM session_dir_visits WHERE session_id = ? AND path NOT IN ("
+        "  SELECT path FROM session_dir_visits WHERE session_id = ?"
+        "  ORDER BY last_visited_at DESC LIMIT ?)",
+        (session_id, session_id, MAX_DIR_VISITS),
+    )
+
+
+async def get_dir_visits(session_id: str, limit: int = 40) -> list[dict]:
+    """Directories this session has opened, most recently visited first."""
+    rows = await _fetchall(
+        "SELECT path, visits, last_visited_at FROM session_dir_visits"
+        " WHERE session_id = ? ORDER BY last_visited_at DESC LIMIT ?",
+        (session_id, limit),
+    )
+    return [dict(r) for r in rows]
+
+
+async def forget_dir_visit(session_id: str, path: str) -> None:
+    await _execute(
+        "DELETE FROM session_dir_visits WHERE session_id = ? AND path = ?",
+        (session_id, path),
+    )
+
+
+async def clear_dir_visits(session_id: str) -> None:
+    await _execute("DELETE FROM session_dir_visits WHERE session_id = ?", (session_id,))
 
 
 # ── Settings ────────────────────────────────────────────────────────────────

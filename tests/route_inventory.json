@@ -350,6 +350,13 @@
     "name": "delete_entry"
   },
   {
+    "path": "/api/files/forget-dir",
+    "methods": [
+      "POST"
+    ],
+    "name": "forget_dir"
+  },
+  {
     "path": "/api/files/format",
     "methods": [
       "POST"
@@ -364,18 +371,18 @@
     "name": "serve_image"
   },
   {
-    "path": "/api/files/media",
-    "methods": [
-      "GET"
-    ],
-    "name": "serve_media"
-  },
-  {
     "path": "/api/files/list",
     "methods": [
       "GET"
     ],
     "name": "list_dir"
+  },
+  {
+    "path": "/api/files/media",
+    "methods": [
+      "GET"
+    ],
+    "name": "serve_media"
   },
   {
     "path": "/api/files/mkdir",
@@ -397,6 +404,13 @@
       "GET"
     ],
     "name": "read_file"
+  },
+  {
+    "path": "/api/files/recent-dirs",
+    "methods": [
+      "GET"
+    ],
+    "name": "recent_dirs"
   },
   {
     "path": "/api/files/rename",
@@ -422,16 +436,16 @@
   {
     "path": "/api/sessions",
     "methods": [
-      "POST"
+      "GET"
     ],
-    "name": "create_session"
+    "name": "list_sessions"
   },
   {
     "path": "/api/sessions",
     "methods": [
-      "GET"
+      "POST"
     ],
-    "name": "list_sessions"
+    "name": "create_session"
   },
   {
     "path": "/api/sessions/{session_id}",
@@ -618,9 +632,9 @@
   {
     "path": "/api/sessions/{session_id}/write-dirs",
     "methods": [
-      "POST"
+      "DELETE"
     ],
-    "name": "add_write_dir"
+    "name": "remove_write_dir"
   },
   {
     "path": "/api/sessions/{session_id}/write-dirs",
@@ -632,9 +646,9 @@
   {
     "path": "/api/sessions/{session_id}/write-dirs",
     "methods": [
-      "DELETE"
+      "POST"
     ],
-    "name": "remove_write_dir"
+    "name": "add_write_dir"
   },
   {
     "path": "/api/status",

@@ -213,7 +213,44 @@ async def list_dir(session_id: str = "", path: str = ""):
             })
     except (PermissionError, OSError) as e:
         raise HTTPException(403, f"Cannot list {d}: {e}") from None
+    # Recorded here rather than from the browser, because this is the one place
+    # every kind of navigation passes through -- typing a path, clicking a row,
+    # back/forward, the home button, the attach picker. A second call from the
+    # client would have to be added to each of them and would be forgotten by
+    # one of them.
+    if session is not None:
+        await db.record_dir_visit(session["id"], str(d))
     return {"path": str(d), "parent": str(d.parent), "entries": entries}
+
+
+@router.get("/recent-dirs")
+async def recent_dirs(session_id: str = ""):
+    """Directories this session has opened, for the file manager's sidebar.
+
+    Both orderings come back in one response because they are two views of the
+    same forty rows and the sidebar switches between them without a round trip.
+    "Frequent" is by visit count; ties break on recency, so the list cannot
+    reorder itself arbitrarily among the many directories visited exactly once.
+    """
+    if not session_id:
+        return {"recent": [], "frequent": []}
+    rows = await db.get_dir_visits(session_id)
+    # `rows` is already most-recent-first and Python's sort is stable, so
+    # sorting on the count alone leaves recency as the tie-break for free.
+    frequent = sorted(rows, key=lambda r: -r["visits"])
+    return {"recent": rows, "frequent": frequent}
+
+
+@router.post("/forget-dir")
+async def forget_dir(body: PathRequest):
+    """Drop one directory from the sidebar, or all of them when path is empty."""
+    if not body.session_id:
+        raise HTTPException(400, "No session")
+    if body.path:
+        await db.forget_dir_visit(body.session_id, body.path)
+    else:
+        await db.clear_dir_visits(body.session_id)
+    return {"ok": True}
 
 
 @router.post("/mkdir")
